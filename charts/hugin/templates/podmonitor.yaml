@@ -1,0 +1,17 @@
+{{- if .Values.podMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "hugin.fullname" . }}
+  labels:
+    {{- include "hugin.labels" . | nindent 4 }}
+    {{- with .Values.podMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels: {{- include "hugin.selector" . | nindent 6 }}
+  podMetricsEndpoints:
+    - port: ops
+      path: /metrics
+{{- end }}

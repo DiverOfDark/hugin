@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hugin
+description: Small server-rendered homelab dashboard that discovers services from Ingress annotations
+version: 0.1.0
+appVersion: "0.1.0"
+type: application

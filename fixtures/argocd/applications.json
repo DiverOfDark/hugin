@@ -1,0 +1,108 @@
+{
+  "items": [
+    {
+      "metadata": {
+        "name": "app-0"
+      },
+      "status": {
+        "health": {
+          "status": "Degraded"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-1"
+      },
+      "status": {
+        "health": {
+          "status": "Degraded"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-2"
+      },
+      "status": {
+        "health": {
+          "status": "Degraded"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-3"
+      },
+      "status": {
+        "health": {
+          "status": "Healthy"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-4"
+      },
+      "status": {
+        "health": {
+          "status": "Healthy"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-5"
+      },
+      "status": {
+        "health": {
+          "status": "Healthy"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-6"
+      },
+      "status": {
+        "health": {
+          "status": "Healthy"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    },
+    {
+      "metadata": {
+        "name": "app-7"
+      },
+      "status": {
+        "health": {
+          "status": "Healthy"
+        },
+        "sync": {
+          "status": "Synced"
+        }
+      }
+    }
+  ]
+}

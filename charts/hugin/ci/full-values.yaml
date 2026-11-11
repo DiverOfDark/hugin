@@ -1,0 +1,65 @@
+# Exercises every template; used by CI's `helm template` check.
+ingress:
+  enabled: true
+  className: traefik
+  labels:
+    example.com/expose: external
+  annotations:
+    cert-manager.io/cluster-issuer: acme
+  hosts:
+    - host: status.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - hosts: [status.example.com]
+      secretName: status-tls
+config:
+  title: Example Lab
+  discovery:
+    ingress: true
+    traefikIngressRoutes: true
+  header:
+    weather:
+      label: Berlin
+      latitude: 52.5
+      longitude: 13.33
+    search:
+      provider: duckduckgo
+  bookmarks:
+    - group: Dev
+      items:
+        - name: Github
+          abbr: GH
+          href: https://github.com/
+  services:
+    - group: Infra
+      name: Pihole
+      href: http://192.0.2.2/
+      widget:
+        type: pihole
+        params:
+          url: http://192.0.2.2
+          version: 6
+        secrets:
+          key:
+            namespace: dns
+            name: pihole
+            key: password
+secretAccess:
+  - namespace: dns
+    names: [pihole]
+  - namespace: argocd
+    names: [argocd-readonly-token]
+podMonitor:
+  enabled: true
+resources:
+  requests: { cpu: 10m, memory: 24Mi }
+  limits: { memory: 64Mi }
+additionalObjects:
+  - apiVersion: v1
+    kind: ConfigMap
+    metadata:
+      name: '{{ include "hugin.fullname" . }}-extra'
+    data:
+      hello: world

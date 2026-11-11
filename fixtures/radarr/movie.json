@@ -1,0 +1,38 @@
+[
+  {
+    "id": 47,
+    "title": "Movie 0",
+    "monitored": true,
+    "hasFile": true,
+    "isAvailable": true,
+    "status": "released",
+    "year": 2025
+  },
+  {
+    "id": 48,
+    "title": "Movie 1",
+    "monitored": true,
+    "hasFile": false,
+    "isAvailable": true,
+    "status": "released",
+    "year": 2019
+  },
+  {
+    "id": 49,
+    "title": "Movie 2",
+    "monitored": true,
+    "hasFile": true,
+    "isAvailable": true,
+    "status": "released",
+    "year": 2026
+  },
+  {
+    "id": 51,
+    "title": "Movie 3",
+    "monitored": true,
+    "hasFile": true,
+    "isAvailable": true,
+    "status": "released",
+    "year": 2013
+  }
+]

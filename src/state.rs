@@ -1,0 +1,397 @@
+//! Shared in-memory state. Everything is behind short-lived std mutexes that
+//! are never held across an await.
+
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
+use tokio::sync::{broadcast, Notify};
+
+use crate::config::Config;
+use crate::metrics::Metrics;
+use crate::model::{KubeRef, PodStatus, Selector, Service};
+use crate::weather::WeatherNow;
+use crate::widgets::{Registry, WidgetData};
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PodInfo {
+    pub labels: BTreeMap<String, String>,
+    pub phase: String,
+    /// Sum of container CPU limits, in cores.
+    pub cpu_limit: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    /// cores
+    pub cpu: f64,
+    /// bytes
+    pub memory: f64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeInfo {
+    pub name: String,
+    pub ready: bool,
+    pub cpu_capacity: f64,
+    pub memory_capacity: f64,
+    pub usage: Option<Usage>,
+}
+
+/// What a card shows for a widget.
+#[derive(Debug, Clone, PartialEq)]
+pub enum WidgetState {
+    Data(WidgetData),
+    Error(String),
+}
+
+/// Pod health and usage for one service.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ServiceHealth {
+    pub status: PodStatus,
+    /// `None` until pod metrics have been fetched.
+    pub usage: Option<Usage>,
+    pub cpu_limit: f64,
+}
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    Fragment { id: Arc<str>, html: Arc<str> },
+    Reload,
+}
+
+/// The last rendered dashboard: card HTML by id plus the group layout.
+#[derive(Debug, Clone, Default)]
+pub struct View {
+    pub groups: Vec<(String, Vec<Arc<str>>)>,
+    pub fragments: HashMap<Arc<str>, Arc<str>>,
+}
+
+pub struct AppState {
+    pub cfg: Config,
+    pub registry: Registry,
+    pub metrics: Metrics,
+    pub static_services: Vec<Service>,
+    /// Discovered services by source key ("ingress/<ns>/<name>").
+    pub discovered: Mutex<BTreeMap<String, Service>>,
+    /// namespace -> pod name -> info
+    pub pods: Mutex<HashMap<String, HashMap<String, PodInfo>>>,
+    /// namespace -> pod name -> usage
+    pub pod_usage: Mutex<Option<HashMap<String, HashMap<String, Usage>>>>,
+    pub nodes: Mutex<Vec<NodeInfo>>,
+    pub widgets: Mutex<HashMap<String, WidgetState>>,
+    pub weather: Mutex<Option<WeatherNow>>,
+    pub view: Mutex<View>,
+    pub events: broadcast::Sender<Event>,
+    /// Bumped on every broadcast; lets a new SSE client tell whether the
+    /// page it loaded is still current.
+    pub version: AtomicU64,
+    /// Something changed; the render loop should diff and broadcast.
+    pub dirty: Notify,
+    /// Someone is watching again; pollers should resume.
+    pub wake: Notify,
+    pub sse_clients: AtomicUsize,
+    /// Set once the initial Ingress list has been processed.
+    pub discovery_synced: AtomicBool,
+    last_seen: AtomicU64,
+    started: Instant,
+}
+
+impl AppState {
+    pub fn new(cfg: Config) -> Self {
+        let (events, _) = broadcast::channel(256);
+        let static_services = cfg.static_services();
+        Self {
+            cfg,
+            registry: Registry::default(),
+            metrics: Metrics::default(),
+            static_services,
+            discovered: Mutex::default(),
+            pods: Mutex::default(),
+            pod_usage: Mutex::default(),
+            nodes: Mutex::default(),
+            widgets: Mutex::default(),
+            weather: Mutex::default(),
+            view: Mutex::default(),
+            events,
+            version: AtomicU64::new(1),
+            dirty: Notify::new(),
+            wake: Notify::new(),
+            sse_clients: AtomicUsize::new(0),
+            discovery_synced: AtomicBool::new(false),
+            last_seen: AtomicU64::new(0),
+            started: Instant::now(),
+        }
+    }
+
+    fn now(&self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+
+    /// Records a page view or live client and resumes polling if it had
+    /// gone idle.
+    pub fn touch(&self) {
+        let was_active = self.is_active();
+        // +1 so that "never seen" (0) stays distinguishable.
+        self.last_seen.store(self.now() + 1, Ordering::Relaxed);
+        if !was_active {
+            self.wake.notify_waiters();
+        }
+    }
+
+    /// Upstreams are only polled while somebody is looking.
+    pub fn is_active(&self) -> bool {
+        if self.sse_clients.load(Ordering::Relaxed) > 0 {
+            return true;
+        }
+        let seen = self.last_seen.load(Ordering::Relaxed);
+        seen != 0 && self.now() + 1 - seen <= self.cfg.intervals.idle_after_seconds
+    }
+
+    /// Waits until polling should run.
+    pub async fn wait_active(&self) {
+        loop {
+            let notified = self.wake.notified();
+            if self.is_active() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// All services, grouped and ordered the way gethomepage orders them:
+    /// groups alphabetically (after any configured order), services by
+    /// weight then name.
+    pub fn grouped_services(&self) -> Vec<(String, Vec<Service>)> {
+        let mut by_group: BTreeMap<String, Vec<Service>> = BTreeMap::new();
+        let discovered = self.discovered.lock().unwrap().clone();
+        for service in discovered
+            .into_values()
+            .chain(self.static_services.iter().cloned())
+        {
+            by_group
+                .entry(service.group.clone())
+                .or_default()
+                .push(service);
+        }
+        for services in by_group.values_mut() {
+            services.sort_by(|a, b| {
+                a.weight
+                    .cmp(&b.weight)
+                    .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+        }
+        let mut ordered = Vec::with_capacity(by_group.len());
+        for name in &self.cfg.group_order {
+            if let Some(services) = by_group.remove(name) {
+                ordered.push((name.clone(), services));
+            }
+        }
+        ordered.extend(by_group);
+        ordered
+    }
+
+    pub fn services(&self) -> Vec<Service> {
+        self.grouped_services()
+            .into_iter()
+            .flat_map(|(_, services)| services)
+            .collect()
+    }
+
+    /// Pod status exactly as gethomepage computes it (pod phase, not
+    /// readiness), plus summed usage of the matching pods.
+    pub fn health(&self, kube: &KubeRef) -> ServiceHealth {
+        let selector = Selector::parse(&kube.pod_selector);
+        let pods = self.pods.lock().unwrap();
+        let matching: Vec<(&String, &PodInfo)> = pods
+            .get(&kube.namespace)
+            .map(|ns| {
+                ns.iter()
+                    .filter(|(_, p)| selector.matches(&p.labels))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let up = |p: &PodInfo| p.phase == "Running" || p.phase == "Succeeded";
+        let status = if matching.is_empty() {
+            PodStatus::NotFound
+        } else if matching.iter().all(|(_, p)| up(p)) {
+            PodStatus::Running
+        } else if matching.iter().any(|(_, p)| up(p)) {
+            PodStatus::Partial
+        } else {
+            PodStatus::Down
+        };
+        let cpu_limit = matching.iter().map(|(_, p)| p.cpu_limit).sum();
+
+        let usage_map = self.pod_usage.lock().unwrap();
+        let usage = usage_map.as_ref().map(|all| {
+            let ns = all.get(&kube.namespace);
+            matching
+                .iter()
+                .filter_map(|(name, _)| ns.and_then(|ns| ns.get(*name)))
+                .fold(Usage::default(), |acc, u| Usage {
+                    cpu: acc.cpu + u.cpu,
+                    memory: acc.memory + u.memory,
+                })
+        });
+        ServiceHealth {
+            status,
+            usage,
+            cpu_limit,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::dom_id;
+
+    fn service(group: &str, name: &str, weight: i64) -> Service {
+        Service {
+            id: dom_id(&format!("{group}/{name}")),
+            group: group.into(),
+            name: name.into(),
+            href: None,
+            icon: None,
+            description: None,
+            weight,
+            kube: None,
+            widget: None,
+        }
+    }
+
+    fn pod(phase: &str, app: &str, cpu_limit: f64) -> PodInfo {
+        PodInfo {
+            labels: [("app".to_string(), app.to_string())].into(),
+            phase: phase.into(),
+            cpu_limit,
+        }
+    }
+
+    fn kube_ref(selector: &str) -> KubeRef {
+        KubeRef {
+            namespace: "ns".into(),
+            pod_selector: selector.into(),
+        }
+    }
+
+    #[test]
+    fn groups_alphabetical_services_by_weight_then_name_ignoring_case() {
+        let cfg: Config = serde_json::from_str(
+            r#"{"services":[{"group":"Infra","name":"FritzBox"},{"group":"Infra","name":"Garage"}]}"#,
+        )
+        .unwrap();
+        let state = AppState::new(cfg);
+        {
+            let mut d = state.discovered.lock().unwrap();
+            for s in [
+                service("Media", "Emby", 0),
+                service("Infra", "vaultwarden", 0),
+                service("Infra", "Victoria Logs", 0),
+                service("Infra", "Status Page", 0),
+                service("Apps", "TRMNL Cyberpunk", 0),
+                service("Apps", "Trackhound", 0),
+            ] {
+                d.insert(s.id.clone(), s);
+            }
+        }
+        let grouped = state.grouped_services();
+        let names =
+            |i: usize| -> Vec<&str> { grouped[i].1.iter().map(|s| s.name.as_str()).collect() };
+        assert_eq!(
+            grouped.iter().map(|g| g.0.as_str()).collect::<Vec<_>>(),
+            vec!["Apps", "Infra", "Media"]
+        );
+        assert_eq!(names(0), vec!["Trackhound", "TRMNL Cyberpunk"]);
+        assert_eq!(
+            names(1),
+            vec![
+                "Status Page",
+                "vaultwarden",
+                "Victoria Logs",
+                "FritzBox",
+                "Garage"
+            ]
+        );
+    }
+
+    #[test]
+    fn configured_group_order_comes_first() {
+        let cfg: Config = serde_json::from_str(r#"{"groupOrder":["Media","Nope"]}"#).unwrap();
+        let state = AppState::new(cfg);
+        {
+            let mut d = state.discovered.lock().unwrap();
+            for s in [service("Apps", "a", 0), service("Media", "m", 0)] {
+                d.insert(s.id.clone(), s);
+            }
+        }
+        let grouped = state.grouped_services();
+        assert_eq!(grouped[0].0, "Media");
+        assert_eq!(grouped[1].0, "Apps");
+    }
+
+    #[test]
+    fn health_follows_pod_phase() {
+        let state = AppState::new(Config::default());
+        assert_eq!(state.health(&kube_ref("app=a")).status, PodStatus::NotFound);
+
+        let mut ns = HashMap::new();
+        ns.insert("a-1".to_string(), pod("Running", "a", 0.5));
+        ns.insert("a-job".to_string(), pod("Succeeded", "a", 0.0));
+        ns.insert("b-1".to_string(), pod("Running", "b", 0.0));
+        ns.insert("b-2".to_string(), pod("Pending", "b", 0.0));
+        ns.insert("c-1".to_string(), pod("Failed", "c", 0.0));
+        state.pods.lock().unwrap().insert("ns".into(), ns);
+
+        let a = state.health(&kube_ref("app=a"));
+        assert_eq!(a.status, PodStatus::Running);
+        assert_eq!(a.cpu_limit, 0.5);
+        assert_eq!(a.usage, None, "no metrics fetched yet");
+        assert_eq!(state.health(&kube_ref("app=b")).status, PodStatus::Partial);
+        assert_eq!(state.health(&kube_ref("app=c")).status, PodStatus::Down);
+
+        let mut usage = HashMap::new();
+        usage.insert(
+            "ns".to_string(),
+            HashMap::from([
+                (
+                    "a-1".to_string(),
+                    Usage {
+                        cpu: 0.2,
+                        memory: 100.0,
+                    },
+                ),
+                (
+                    "b-1".to_string(),
+                    Usage {
+                        cpu: 9.0,
+                        memory: 9.0,
+                    },
+                ),
+            ]),
+        );
+        *state.pod_usage.lock().unwrap() = Some(usage);
+        assert_eq!(
+            state.health(&kube_ref("app=a")).usage,
+            Some(Usage {
+                cpu: 0.2,
+                memory: 100.0
+            })
+        );
+    }
+
+    #[test]
+    fn polling_is_idle_until_someone_looks() {
+        let state = AppState::new(Config::default());
+        assert!(!state.is_active());
+        state.touch();
+        assert!(state.is_active());
+        state.last_seen.store(0, Ordering::Relaxed);
+        state.sse_clients.store(1, Ordering::Relaxed);
+        assert!(state.is_active());
+    }
+}

@@ -1,0 +1,79 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "hugin.fullname" . }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- if .Values.rbac.create }}
+---
+# Read-only, and nothing about Secrets: those are granted by name below.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hugin.fullname" . }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+rules:
+  {{- if .Values.config.discovery.ingress }}
+  # Service discovery from annotations.
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  {{- end }}
+  {{- if .Values.config.discovery.traefikIngressRoutes }}
+  - apiGroups: [traefik.io]
+    resources: [ingressroutes]
+    verbs: [get, list, watch]
+  {{- end }}
+  # Status dots (pod phase) and CPU limits for the usage percentage.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
+  # Capacity and readiness for the header.
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [get, list]
+  # Usage from metrics-server.
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hugin.fullname" . }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ include "hugin.fullname" . }} }
+subjects:
+  - { kind: ServiceAccount, name: {{ include "hugin.fullname" . }}, namespace: {{ .Release.Namespace }} }
+{{- range .Values.secretAccess }}
+{{- if .names }}
+---
+# `get` by name only: with resourceNames, list and watch cannot be granted,
+# so no other Secret in this namespace is readable.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "hugin.fullname" $ }}-secrets
+  namespace: {{ .namespace }}
+  labels: {{- include "hugin.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: {{ toJson .names }}
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "hugin.fullname" $ }}-secrets
+  namespace: {{ .namespace }}
+  labels: {{- include "hugin.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "hugin.fullname" $ }}-secrets }
+subjects:
+  - { kind: ServiceAccount, name: {{ include "hugin.fullname" $ }}, namespace: {{ $.Release.Namespace }} }
+{{- end }}
+{{- end }}
+{{- end }}

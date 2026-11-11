@@ -1,0 +1,87 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/diverofdark/hugin
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  labels: {}
+  hosts:
+    - host: hugin.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# Dashboard configuration, rendered to /config/config.json. See the README
+# for every key. Discovered services need nothing here.
+config:
+  title: Hugin
+  columns: 5
+  showStats: true
+  discovery:
+    ingress: true
+    # Also read annotations from Traefik IngressRoute objects. Adds read
+    # access to ingressroutes.traefik.io to the ClusterRole.
+    traefikIngressRoutes: false
+  header:
+    cluster:
+      show: true
+      label: cluster
+    nodes:
+      show: true
+    # weather:
+    #   label: Berlin
+    #   latitude: 52.5
+    #   longitude: 13.33
+    #   timezone: Europe/Berlin
+    # search:
+    #   provider: google
+  bookmarks: []
+  services: []
+
+# Secrets the dashboard may read, by namespace and name. Each entry becomes a
+# Role with `get` on exactly those Secrets plus a RoleBinding; nothing else is
+# readable. List every Secret referenced by a
+# `hugin.dev/widget.<field>-from-secret` annotation or by `config.services`.
+secretAccess: []
+  # - namespace: argocd
+  #   names: [argocd-readonly-token]
+
+rbac:
+  # ClusterRole (read Ingresses, Pods, Nodes, metrics) and the Secret Roles.
+  create: true
+
+serviceAccount:
+  annotations: {}
+
+# Prometheus Operator PodMonitor for /metrics on the ops port.
+podMonitor:
+  enabled: false
+  labels: {}
+
+# tracing-subscriber filter, e.g. "hugin=debug,warn".
+logLevel: "hugin=info,warn"
+
+# Additional Kubernetes manifests to render with this release. Entries are
+# evaluated with Helm's tpl, so values like
+# {{ include "hugin.fullname" . }} can be used inside them.
+additionalObjects: []
+
+podAnnotations: {}
+podLabels: {}
+
+resources: {}
+  # requests: { cpu: 10m, memory: 24Mi }
+  # limits: { memory: 64Mi }
+nodeSelector: {}
+tolerations: []
+affinity: {}
