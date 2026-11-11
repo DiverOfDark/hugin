@@ -118,6 +118,8 @@ A widget shows at most four values. Numbers are formatted the way gethomepage fo
 
 When an upstream call fails, the card shows "API Error" with a short reason such as `HTTP 401` or `timeout`. The reason never includes the URL, because some APIs carry the key in the query string.
 
+A widget that already shows values keeps them, dimmed, through two failed refreshes in a row. The error replaces them on the third.
+
 ## Configuration
 
 The chart renders its `config` value to `/config/config.json`. All keys are optional.

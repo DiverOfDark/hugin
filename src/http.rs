@@ -23,8 +23,9 @@ impl Client {
         let inner = reqwest::Client::builder()
             .user_agent(concat!("hugin/", env!("CARGO_PKG_VERSION")))
             .redirect(reqwest::redirect::Policy::none())
+            // No shorter connect timeout: upstreams reached over a VPN or a
+            // subnet router can take several seconds to accept.
             .timeout(timeout)
-            .connect_timeout(timeout.min(Duration::from_secs(5)))
             .pool_max_idle_per_host(1)
             .pool_idle_timeout(Duration::from_secs(45))
             .build()?;

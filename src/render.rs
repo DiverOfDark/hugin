@@ -119,10 +119,17 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
         return html! {};
     };
     let current = state.widgets.lock().unwrap().get(&service.id).cloned();
+    // Set while the values on screen are older than the latest (failed) refresh.
+    let stale = state
+        .widget_failures
+        .lock()
+        .unwrap()
+        .get(&service.id)
+        .map(|(_, reason)| format!("Last refresh failed: {reason}"));
     match current {
         Some(WidgetState::Data(data)) => html! {
             @if !data.blocks.is_empty() {
-                div.blocks {
+                div.blocks.stale[stale.is_some()] title=[stale.as_deref()] {
                     @for b in &data.blocks { (block(b.label, Some(&b.value))) }
                 }
             }
@@ -469,10 +476,17 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                             Some(WidgetState::Error(e)) => (Vec::new(), Some(e.clone())),
                             None => (Vec::new(), None),
                         };
+                        let stale = state
+                            .widget_failures
+                            .lock()
+                            .unwrap()
+                            .get(&s.id)
+                            .map(|(_, reason)| reason.clone());
                         serde_json::json!({
                             "type": spec.kind,
                             "blocks": blocks,
                             "error": error,
+                            "staleReason": stale,
                             "secretFields": spec.secrets.keys().collect::<Vec<_>>(),
                         })
                     });
@@ -598,6 +612,28 @@ mod tests {
         assert!(html.contains(r#"class="dot ok" title="running""#));
         assert!(html.contains("0.0314"));
         assert!(html.contains("1.54 GB"));
+    }
+
+    #[test]
+    fn stale_values_are_marked_with_the_reason() {
+        let (state, service) = state_with_service();
+        state.widgets.lock().unwrap().insert(
+            service.id.clone(),
+            WidgetState::Data(WidgetData::from(vec![Block::new("Apps", "75")])),
+        );
+        assert!(!card(&state, &service).into_string().contains("stale"));
+        state
+            .widget_failures
+            .lock()
+            .unwrap()
+            .insert(service.id.clone(), (1, "timeout".into()));
+        let html = card(&state, &service).into_string();
+        assert!(html.contains(r#"class="blocks stale" title="Last refresh failed: timeout""#));
+        assert!(html.contains("75"));
+        assert_eq!(
+            snapshot(&state)["groups"][0]["services"][0]["widget"]["staleReason"],
+            "timeout"
+        );
     }
 
     #[test]

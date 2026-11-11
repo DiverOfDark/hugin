@@ -2,7 +2,7 @@
 //! are never held across an await.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -81,6 +81,9 @@ pub struct AppState {
     pub pod_usage: Mutex<Option<HashMap<String, HashMap<String, Usage>>>>,
     pub nodes: Mutex<Vec<NodeInfo>>,
     pub widgets: Mutex<HashMap<String, WidgetState>>,
+    /// Consecutive failed refreshes per service and the latest reason, for
+    /// widgets still showing their last good values.
+    pub widget_failures: Mutex<HashMap<String, (u32, String)>>,
     pub weather: Mutex<Option<WeatherNow>>,
     pub view: Mutex<View>,
     pub events: broadcast::Sender<Event>,
@@ -92,8 +95,6 @@ pub struct AppState {
     /// Someone is watching again; pollers should resume.
     pub wake: Notify,
     pub sse_clients: AtomicUsize,
-    /// Set once the initial Ingress list has been processed.
-    pub discovery_synced: AtomicBool,
     last_seen: AtomicU64,
     started: Instant,
 }
@@ -112,6 +113,7 @@ impl AppState {
             pod_usage: Mutex::default(),
             nodes: Mutex::default(),
             widgets: Mutex::default(),
+            widget_failures: Mutex::default(),
             weather: Mutex::default(),
             view: Mutex::default(),
             events,
@@ -119,7 +121,6 @@ impl AppState {
             dirty: Notify::new(),
             wake: Notify::new(),
             sse_clients: AtomicUsize::new(0),
-            discovery_synced: AtomicBool::new(false),
             last_seen: AtomicU64::new(0),
             started: Instant::now(),
         }

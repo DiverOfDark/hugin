@@ -9,10 +9,12 @@ use crate::metrics::{FetchLabels, ResourceLabels, SourceLabels, WidgetLabels};
 use crate::model::{Service, WidgetSpec};
 use crate::secrets::SecretReader;
 use crate::state::{AppState, WidgetState};
-use crate::widgets::{Http, WidgetConfig};
+use crate::widgets::{Http, WidgetConfig, WidgetData};
 
 const CONCURRENT_WIDGETS: usize = 6;
 const SENSITIVE: [&str; 3] = ["key", "password", "token"];
+/// Failed refreshes in a row during which the last good values stay up.
+const STALE_FAILURES: u32 = 2;
 
 /// Where a widget's credentials came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,21 +117,43 @@ async fn refresh_widget(
         })
         .observe(started.elapsed().as_secs_f64());
 
-    let new_state = match result {
-        Ok(data) => WidgetState::Data(data),
-        Err(reason) => {
-            tracing::debug!(service = %service.name, widget = %spec.kind, reason, "widget refresh failed");
-            WidgetState::Error(reason)
-        }
-    };
-    let changed = {
-        let mut widgets = state.widgets.lock().unwrap();
-        widgets.insert(service.id.clone(), new_state.clone()) != Some(new_state)
-    };
-    if changed {
+    if record_result(state, &service.id, result) {
         state.dirty.notify_one();
     }
     source
+}
+
+/// Stores a refresh result and reports whether the card changed. A widget
+/// that already shows values keeps them through [`STALE_FAILURES`] failed
+/// refreshes in a row, so one dropped request does not flash an error.
+fn record_result(state: &AppState, id: &str, result: Result<WidgetData, String>) -> bool {
+    let mut widgets = state.widgets.lock().unwrap();
+    let mut failures = state.widget_failures.lock().unwrap();
+    match result {
+        Ok(data) => {
+            let recovered = failures.remove(id).is_some();
+            let new_state = WidgetState::Data(data);
+            let changed = widgets.get(id) != Some(&new_state);
+            widgets.insert(id.to_string(), new_state);
+            changed || recovered
+        }
+        Err(reason) => {
+            tracing::debug!(id, reason, "widget refresh failed");
+            let count = failures.get(id).map_or(0, |(n, _)| *n) + 1;
+            let keep_values =
+                count <= STALE_FAILURES && matches!(widgets.get(id), Some(WidgetState::Data(_)));
+            if keep_values {
+                failures.insert(id.to_string(), (count, reason));
+                true
+            } else {
+                failures.remove(id);
+                let new_state = WidgetState::Error(reason);
+                let changed = widgets.get(id) != Some(&new_state);
+                widgets.insert(id.to_string(), new_state);
+                changed
+            }
+        }
+    }
 }
 
 pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Arc<SecretReader>) {
@@ -175,6 +199,11 @@ pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Ar
                 services.iter().map(|(s, _)| s.id.as_str()).collect();
             state
                 .widgets
+                .lock()
+                .unwrap()
+                .retain(|id, _| live.contains(id.as_str()));
+            state
+                .widget_failures
                 .lock()
                 .unwrap()
                 .retain(|id, _| live.contains(id.as_str()));
@@ -302,6 +331,43 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, "no cluster access");
+    }
+
+    #[test]
+    fn last_good_values_survive_two_failures_then_the_error_shows() {
+        use crate::widgets::Block;
+        let state = AppState::new(crate::config::Config::default());
+        let data = || WidgetData::from(vec![Block::new("Queries", "1")]);
+        let shown = |state: &AppState| state.widgets.lock().unwrap().get("s").cloned();
+
+        // A failure before any success is shown straight away.
+        assert!(record_result(&state, "s", Err("timeout".into())));
+        assert_eq!(shown(&state), Some(WidgetState::Error("timeout".into())));
+
+        assert!(record_result(&state, "s", Ok(data())));
+        assert!(
+            !record_result(&state, "s", Ok(data())),
+            "same values, no change"
+        );
+
+        for _ in 0..STALE_FAILURES {
+            assert!(record_result(&state, "s", Err("timeout".into())));
+            assert_eq!(shown(&state), Some(WidgetState::Data(data())));
+        }
+        assert_eq!(state.widget_failures.lock().unwrap()["s"].0, STALE_FAILURES);
+
+        assert!(record_result(&state, "s", Err("timeout".into())));
+        assert_eq!(shown(&state), Some(WidgetState::Error("timeout".into())));
+        assert!(state.widget_failures.lock().unwrap().is_empty());
+
+        // Recovery clears the stale marker.
+        record_result(&state, "s", Ok(data()));
+        record_result(&state, "s", Err("timeout".into()));
+        assert!(
+            record_result(&state, "s", Ok(data())),
+            "stale marker removed"
+        );
+        assert!(state.widget_failures.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

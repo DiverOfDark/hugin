@@ -5,7 +5,6 @@
 //! does not cost megabytes of image lists, env vars and volume specs.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use futures::StreamExt;
@@ -245,12 +244,8 @@ pub async fn watch_ingresses(state: Arc<AppState>, client: Client) {
     while let Some(event) = stream.next().await {
         match event {
             Ok(event) => {
-                let done = matches!(event, Event::InitDone);
                 if let Some(event) = map_event(event, ingress_service) {
                     sync.apply(&state, event);
-                }
-                if done {
-                    state.discovery_synced.store(true, Ordering::Relaxed);
                 }
             }
             Err(error) => watch_error(&state, "ingresses", &error),
