@@ -26,8 +26,10 @@ impl Client {
             // No shorter connect timeout: upstreams reached over a VPN or a
             // subnet router can take several seconds to accept.
             .timeout(timeout)
-            .pool_max_idle_per_host(1)
-            .pool_idle_timeout(Duration::from_secs(45))
+            // No idle connections: with a refresh every 30 s most upstreams
+            // have closed theirs by the next request, and reusing a dead one
+            // fails the refresh. A fresh handshake per request is cheap here.
+            .pool_max_idle_per_host(0)
             .build()?;
         Ok(Self { inner })
     }
