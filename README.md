@@ -2,7 +2,7 @@
 
 Hugin is a small dashboard for a Kubernetes homelab. It lists your services by reading annotations on Ingresses, shows whether their pods are up, and adds a few numbers from each service's own API.
 
-It is one Rust binary that renders HTML on the server and pushes updates to the browser over server-sent events. It uses about 20 MiB of memory.
+It is one Rust binary that renders HTML on the server and pushes updates to the browser over server-sent events. On a cluster with about 400 pods and 38 services it uses about 10 MiB of memory and 10 millicores while the page is open.
 
 Hugin reads the `gethomepage.dev/*` annotations of [gethomepage](https://gethomepage.dev), so a cluster annotated for gethomepage works without changing any manifest.
 
@@ -215,6 +215,7 @@ Anyone who can annotate an Ingress can make Hugin call the URL in `widget.url`. 
 - The Argo CD widget asks for only the sync and health fields, which turns a multi-megabyte response into a few kilobytes.
 - The ruTorrent widget sends a form content type with its request.
 - Values refresh on the server on a timer and are shared by all viewers, instead of each browser polling.
+- Each request to a service opens a new connection. Idle connections are not kept.
 - Only the widgets listed above exist.
 
 ## Development
