@@ -55,7 +55,7 @@ Put these on an Ingress. Each one can be written with the `gethomepage.dev/` pre
 
 Pods are looked up in the Ingress's own namespace.
 
-The status dot is green when every matching pod is in phase `Running` or `Succeeded`. It is orange when only some are, when none are, or when no pod matches.
+A service is running when every matching pod is in phase `Running` or `Succeeded`. It needs attention when only some are, when none are, or when no pod matches. Pods in phase `Failed` are ignored while other pods match: they are leftovers (of a node shutdown, for instance) that their controller has already replaced.
 
 ### Icons
 
