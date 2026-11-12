@@ -314,14 +314,13 @@ fn summary(state: &AppState) -> Markup {
     let widgets = state.widgets.lock().unwrap().clone();
     let mut total = 0;
     let mut troubled: Vec<(String, String)> = Vec::new();
+    let mut any_down = false;
     for (_, services) in state.grouped_services() {
         for service in services {
             total += 1;
-            let down = service
-                .kube
-                .as_ref()
-                .map(|k| state.health(k).status)
-                .is_some_and(|status| status != PodStatus::Running);
+            let status = service.kube.as_ref().map(|k| state.health(k).status);
+            let down = status.is_some_and(|status| status != PodStatus::Running);
+            any_down |= status == Some(PodStatus::Down);
             let failed = matches!(widgets.get(&service.id), Some(WidgetState::Error(_)));
             if down || failed {
                 troubled.push((service.id.clone(), service.name.clone()));
@@ -329,7 +328,8 @@ fn summary(state: &AppState) -> Markup {
         }
     }
     html! {
-        p.summary.warn[!troubled.is_empty()] #(HEADER_SUMMARY_ID) {
+        // The stylesheet tints the page from these classes.
+        p.summary.warn[!troubled.is_empty() && !any_down].down[any_down] #(HEADER_SUMMARY_ID) {
             @if troubled.is_empty() {
                 @if total == 1 { "The one service is running" } @else { "All " (total) " services are running" }
             } @else {
