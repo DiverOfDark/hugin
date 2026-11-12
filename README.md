@@ -11,7 +11,7 @@ Hugin reads the `gethomepage.dev/*` annotations of [gethomepage](https://gethome
 - Service discovery from Ingress annotations, and optionally from Traefik `IngressRoute` objects.
 - A status dot per service from pod phase, plus CPU and memory of the pods.
 - Widgets are sandboxed Lua scripts stored in the cluster as `Widget` resources. None are built in.
-- A generator writes the widget for each service with a language model and validates it against the live service. For an application gethomepage has a widget for, it ports that one.
+- A generator writes the widget for each service: a language model researches the application on the web, explores the live service's API, and hands in a script that is validated against the service.
 - Your own widgets, written by hand, take precedence.
 - Widget credentials read from Kubernetes Secrets by reference, with RBAC limited to the Secrets you name.
 - Header with cluster and node CPU and memory, Open-Meteo weather and a search box.
@@ -142,16 +142,18 @@ generator:
     key: OPENAI_API_KEY
 ```
 
-It works with any OpenAI-compatible chat-completions API; set `generator.apiUrl` for another provider or a local model.
+It talks to a Responses API (`/v1/responses`) and uses the provider's hosted web search tool. Set `generator.apiUrl` for another provider that implements both, or `generator.webSearch: false` for one without web search, such as a local model.
 
 For each service with a `widget.type`, the generator:
 
 1. Probes a few well-known paths of the service, such as `/openapi.json`, without credentials.
-2. Fetches gethomepage's source for that widget type from GitHub, if there is one, as the reference to port.
-3. Asks the model for a script, giving it the [script API](docs/widget-api.md), the probe results, the reference and your hint.
-4. Runs the script against the service, in the same sandbox the dashboard uses.
-5. Sends errors, the request trace and response sizes back to the model, up to `generator.rounds` times.
-6. Stores the first script that returns a sensible, small enough card.
+2. Starts the model as an agent, giving it the [script API](docs/widget-api.md), the probe results and your hint. The model has three tools:
+   - **web search**, to find the application's API documentation or source. Its first step must be a search, unless the service published an OpenAPI document.
+   - **`run_script`**, which runs a Lua script against the service in the same sandbox the dashboard uses, and returns the result, every request made and the response sizes. The model explores the API with it.
+   - **`submit_script`**, which hands in the final script.
+3. Runs the submitted script against the service and stores it if it returns a sensible, small enough card. Otherwise the model is told why and continues.
+
+The model gets `generator.steps` replies per service. It can also end with a sentence saying why the card cannot be built, which becomes the `Widget`'s failure message.
 
 The `Widget` is named `auto-<ingress name>` and lives in the service's namespace. It has an owner reference to the Ingress, so Argo CD lists it under the Ingress and it is deleted with it. Widgets for static services are owned by hugin's ConfigMap.
 
@@ -160,20 +162,20 @@ The `Widget` is named `auto-<ingress name>` and lives in the service's namespace
 Things to know:
 
 - **The model never sees credentials.** They are placeholders in the script and are redacted from response bodies. It does see the rest of what the service answers.
-- **"Validated" means the script ran and returned values.** It does not prove a value means what its label says. Read a generated script once.
-- **Known applications work best.** With a gethomepage reference the model ports a working widget. For anything else it relies on the probes, an OpenAPI document if the service has one, and your hint.
-- **Use `widget.hint` when it gets something wrong**, for example to name the endpoint or say that no API key is set.
+- **The model reads web pages, which are untrusted.** A page cannot reach your cluster: searches run at the provider, and the only thing the model can do here is run sandboxed scripts against the one service. A stored script can still call any endpoint of that service with its credential, so read a generated script once.
+- **"Validated" means the script ran and returned values.** It does not prove a value means what its label says.
+- **Documented applications work best.** For an application nobody has written about, the model relies on the probes, an OpenAPI document if the service has one, and your hint.
+- **Use `widget.hint` when it gets something wrong**, for example to name the endpoint, an undocumented parameter, or say that no API key is set.
 - **A script is written again** when the service's widget annotations change, on a major version bump of its image, when the `Widget` is deleted or annotated `hugin.dev/regenerate`, or when the stored script fails two re-checks in a row. Re-checks run every `generator.revalidateHours`.
 - **A failed generation** leaves a `Widget` with `status.phase: Failed` and the reason. It is retried after ten minutes, then every `generator.retryHours`. A script that worked before is kept and stays in use.
-- **A script that downloads a lot** is sent back for a lighter one twice, then kept if the model finds none.
+- **A script that downloads a lot** is sent back three times for a lighter one, with a search of the documentation first, then kept if the model finds none.
 - **Generated widgets no service asks for are deleted.**
 - **The dashboard does not need the generator.** It runs as a separate Deployment and only writes `Widget` resources.
-- `generator.referenceUrl: ""` turns the gethomepage reference off.
 
 To try a generation without storing anything:
 
 ```bash
-hugin draft <namespace>/<ingress> --ai-model gpt-5-mini --hint "queue length and failures"
+hugin draft <namespace>/<ingress> --ai-model gpt-5-mini --ai-reasoning-effort medium --hint "queue length and failures"
 ```
 
 This prints the script. It needs `HUGIN_AI_KEY` and a kubeconfig; `--url` points it at a port-forward.
