@@ -1,9 +1,7 @@
 //! Service widgets. A widget turns one upstream API into a few labelled
-//! values ("blocks"). Every widget is a Lua script run by [`LuaWidget`]:
-//! the bundled ones live in `widgets/*.lua`, others come from `Widget`
-//! custom resources. Scripts reach the network only through [`Http`], so
-//! each bundled script is unit-tested against a recorded upstream response
-//! (see `fixtures/`).
+//! values ("blocks"). Every widget is a Lua script from a `Widget` custom
+//! resource, run by [`LuaWidget`]; none are compiled in. Scripts reach the
+//! network only through [`Http`].
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -12,8 +10,6 @@ use async_trait::async_trait;
 
 mod lua;
 
-#[cfg(test)]
-mod bundled_tests;
 #[cfg(test)]
 pub mod testing;
 
@@ -178,92 +174,9 @@ pub trait Widget: Send + Sync {
     ) -> Result<WidgetData, WidgetError>;
 }
 
-macro_rules! bundled {
-    ($($name:literal),* $(,)?) => {
-        [$(($name, include_str!(concat!("../../widgets/", $name, ".lua")))),*]
-    };
-}
-
-/// The scripts compiled into the binary, by `widget.type`.
-pub const BUNDLED: [(&str, &str); 14] = bundled![
-    "argocd",
-    "fritzbox",
-    "grafana",
-    "jackett",
-    "nextcloud",
-    "paperlessngx",
-    "pihole",
-    "prometheus",
-    "radarr",
-    "rutorrent",
-    "seerr",
-    "sonarr",
-    "suwayomi",
-    "traefik",
-];
-
-/// Bundled widgets, keyed by `widget.type`.
-pub struct Registry {
-    widgets: Vec<(&'static str, Arc<LuaWidget>)>,
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self {
-            widgets: BUNDLED
-                .iter()
-                .map(|(name, script)| (*name, Arc::new(LuaWidget::new(*name, *script))))
-                .collect(),
-        }
-    }
-}
-
-impl Registry {
-    pub fn get(&self, kind: &str) -> Option<Arc<LuaWidget>> {
-        // jellyseerr and overseerr are the same API as seerr.
-        let kind = match kind {
-            "jellyseerr" | "overseerr" => "seerr",
-            other => other,
-        };
-        self.widgets
-            .iter()
-            .find(|(k, _)| *k == kind)
-            .map(|(_, w)| w.clone())
-    }
-
-    pub fn kinds(&self) -> Vec<&'static str> {
-        self.widgets.iter().map(|(k, _)| *k).collect()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn registry_knows_every_bundled_type() {
-        let registry = Registry::default();
-        for kind in [
-            "argocd",
-            "grafana",
-            "jackett",
-            "jellyseerr",
-            "overseerr",
-            "nextcloud",
-            "paperlessngx",
-            "prometheus",
-            "radarr",
-            "rutorrent",
-            "sonarr",
-            "suwayomi",
-            "traefik",
-            "fritzbox",
-            "pihole",
-        ] {
-            assert!(registry.get(kind).is_some(), "missing widget {kind}");
-        }
-        assert!(registry.get("nope").is_none());
-    }
 
     #[test]
     fn url_drops_trailing_slashes() {
