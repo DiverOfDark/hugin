@@ -12,7 +12,7 @@ use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::model::{KubeRef, PodStatus, Selector, Service};
 use crate::weather::WeatherNow;
-use crate::widgets::{LuaWidget, Registry, WidgetData};
+use crate::widgets::{LuaWidget, WidgetData};
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PodInfo {
@@ -87,7 +87,6 @@ pub struct View {
 
 pub struct AppState {
     pub cfg: Config,
-    pub registry: Registry,
     /// Scripts from `Widget` resources, by (namespace, name).
     pub custom_widgets: Mutex<BTreeMap<(String, String), CustomWidget>>,
     /// The namespace hugin runs in; its `Widget` resources apply everywhere.
@@ -128,7 +127,6 @@ impl AppState {
         let static_services = cfg.static_services();
         Self {
             cfg,
-            registry: Registry::default(),
             custom_widgets: Mutex::default(),
             own_namespace: std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "hugin".into()),
             metrics: Metrics::default(),
@@ -232,7 +230,8 @@ impl AppState {
     /// 1. A `Widget` named like the service's `widget.type`, in the
     ///    service's namespace, then in hugin's: hand-written ones.
     /// 2. The `Widget` the generator wrote for this service.
-    /// 3. A script compiled into the binary.
+    ///
+    /// There are no scripts compiled into the binary.
     pub fn resolve_widget(&self, service: &Service, kind: &str) -> Resolved {
         let custom = self.custom_widgets.lock().unwrap();
         let namespace = service
@@ -250,9 +249,6 @@ impl AppState {
         }
         let generated = service.generated_widget_name();
         if let Some(widget) = script(namespace, &generated) {
-            return Resolved::Script(widget);
-        }
-        if let Some(widget) = self.registry.get(kind) {
             return Resolved::Script(widget);
         }
         let failure = custom
@@ -453,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn widgets_resolve_hand_written_then_generated_then_built_in() {
+    fn widgets_resolve_hand_written_then_generated() {
         let state = AppState::new(Config::default());
         let mut svc = service("Media", "Radarr", 0);
         svc.kube = Some(KubeRef {
@@ -477,12 +473,8 @@ mod tests {
                 .insert((ns.to_string(), name.to_string()), w);
         };
 
-        assert!(
-            which(&state, &svc, "radarr").contains("Radarr:"),
-            "built-in script"
-        );
         assert_eq!(
-            which(&state, &svc, "auto"),
+            which(&state, &svc, "radarr"),
             "pending: waiting for a widget to be generated"
         );
 
@@ -497,7 +489,6 @@ mod tests {
         );
         assert_eq!(which(&state, &svc, "auto"), "pending: no widget: HTTP 500");
 
-        // The generated widget beats the built-in one...
         put("media", "auto-radarr", script("-- generated"));
         assert_eq!(which(&state, &svc, "radarr"), "-- generated");
         // ...a shared hand-written one beats the generated one...

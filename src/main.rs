@@ -292,7 +292,6 @@ async fn run(cli: ServeArgs) -> anyhow::Result<()> {
     tracing::info!(
         addr = %cli.bind,
         ops = %cli.ops_bind,
-        widgets = ?state.registry.kinds(),
         static_services = state.static_services.len(),
         "hugin listening"
     );

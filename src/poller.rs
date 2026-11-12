@@ -194,6 +194,18 @@ fn record_result(state: &AppState, id: &str, result: Result<WidgetData, String>)
     }
 }
 
+/// Hands freed heap pages back to the kernel. Every refresh builds and
+/// drops a Lua VM per widget plus the decoded responses; without this the
+/// allocator keeps the high-water mark of the largest response mapped.
+fn release_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases memory the allocator already holds
+    // as free; it takes no pointers and is safe to call at any time.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Arc<SecretReader>) {
     let interval = Duration::from_secs(state.cfg.intervals.widgets_seconds.max(5));
     loop {
@@ -263,6 +275,7 @@ pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Ar
                 .retain(|id, _| live.contains(id.as_str()));
         }
 
+        release_freed_memory();
         tokio::select! {
             _ = tokio::time::sleep(interval) => {}
             _ = state.refresh_now.notified() => {}
@@ -480,6 +493,17 @@ mod tests {
         };
         let mut spec = spec(&[("url", "http://traefik")], &[]);
         spec.kind = "traefik".into();
+        state.custom_widgets.lock().unwrap().insert(
+            (state.own_namespace.clone(), "traefik".into()),
+            crate::state::CustomWidget {
+                widget: Some(Arc::new(crate::widgets::LuaWidget::new(
+                    "traefik",
+                    r#"local o = http.get("/api/overview"):check():json()
+                       return { { label = "Routers", value = o.http.routers.total } }"#,
+                ))),
+                failure: None,
+            },
+        );
         let flaky = Arc::new(Flaky {
             failures: AtomicUsize::new(1),
             calls: AtomicUsize::new(0),

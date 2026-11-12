@@ -1,8 +1,0 @@
-{
-  "page": 1,
-  "pageSize": 10,
-  "sortKey": "episodes.airDateUtc",
-  "sortDirection": "descending",
-  "totalRecords": 85,
-  "records": []
-}

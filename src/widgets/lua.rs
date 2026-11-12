@@ -83,6 +83,8 @@ pub struct Trace {
     pub url: String,
     pub status: Option<u16>,
     pub error: Option<String>,
+    /// Size of the response body.
+    pub bytes: usize,
     pub body_preview: String,
 }
 
@@ -286,6 +288,7 @@ impl Context {
                     url: traced_url,
                     status: None,
                     error: Some(error.0.clone()),
+                    bytes: 0,
                     body_preview: String::new(),
                 });
                 return Err(failure(error.0));
@@ -298,6 +301,7 @@ impl Context {
             url: traced_url,
             status: Some(response.status),
             error: None,
+            bytes: response.body.len(),
             body_preview: truncate(&body, TRACE_BODY_CHARS),
         });
 

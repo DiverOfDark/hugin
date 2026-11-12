@@ -31,6 +31,12 @@ use crate::secrets::SecretReader;
 use crate::widgets::{Http, LuaWidget, Request, Trace, WidgetConfig, WidgetData, API_REFERENCE};
 
 const FIELD_MANAGER: &str = "hugin-generator";
+/// Part of every widget's input hash: raise it when the prompt or the
+/// acceptance rules change in a way that existing widgets should pick up.
+const PROMPT_VERSION: u32 = 2;
+/// A script runs every refresh on the dashboard pod. Above this many
+/// response bytes per run the model is asked for something lighter.
+const LIGHT_BYTES: usize = 300_000;
 /// Set on a generated Widget to have it written again.
 const REGENERATE_ANNOTATION: &str = "hugin.dev/regenerate";
 const PROBE_PATHS: [&str; 11] = [
@@ -109,6 +115,10 @@ as an HTTP status, \"Up\", a response size or a page title. If you cannot get re
 with `fail` and say what is missing.\n\
 - Use only endpoints you have evidence for: the probe results, the request traces, or an API you \
 know this application has. Prefer one or two cheap endpoints.\n\
+- The script runs every 30 seconds on a small machine. Keep what it downloads small: ask for \
+counts, use filters, limits or field selection, and avoid fetching whole lists when the API has \
+a lighter way. You are told the size of every response.\n\
+- Labels are plain English words, never translation keys such as `app.pending`.\n\
 - Never hardcode a host; use paths under `widget.url`.\n\
 - Use credentials only through `secret(name)`, and only the names listed as available. If the API \
 needs one that is not available, call `fail` with a reason that names it.\n\
@@ -340,6 +350,15 @@ pub fn acceptable(data: &WidgetData) -> Result<(), String> {
                 block.label
             ));
         }
+        let looks_like_a_key = block.label.contains('.')
+            && !block.label.contains(' ')
+            && block.label.chars().next().is_some_and(char::is_lowercase);
+        if looks_like_a_key {
+            return Err(format!(
+                "label \"{}\" is a translation key; use the English label",
+                block.label
+            ));
+        }
         if block.value.trim().is_empty() {
             return Err(format!("block \"{}\" has an empty value", block.label));
         }
@@ -369,7 +388,7 @@ fn feedback(result: &Result<WidgetData, String>, traces: &[Trace]) -> String {
     }
     for trace in traces {
         let outcome = match (&trace.status, &trace.error) {
-            (Some(status), _) => format!("{status} {}", trace.body_preview),
+            (Some(status), _) => format!("{status}, {} bytes: {}", trace.bytes, trace.body_preview),
             (None, Some(error)) => error.clone(),
             (None, None) => String::new(),
         };
@@ -438,40 +457,63 @@ pub async fn generate_script(
         json!({ "role": "user", "content": user_prompt(context, cfg, &probes, source.as_deref()) }),
     ];
     let mut last_problem = String::from("no attempt was made");
+    // A working script that downloads too much is kept as a fallback while
+    // the model is asked for a lighter one.
+    let mut heavy: Option<(usize, Generated)> = None;
     for round in 1..=settings.max_rounds {
         let reply = complete(llm, settings, &messages).await?;
         let script = extract_script(&reply);
         let widget = LuaWidget::new("generated", script.clone());
         let (result, traces) = widget.run(service_http.clone(), cfg).await;
         let result = result.map_err(|e| e.0);
-        let verdict = match &result {
+        let bytes: usize = traces.iter().map(|t| t.bytes).sum();
+        let mut verdict = match &result {
             Ok(data) => acceptable(data),
             Err(reason) => Err(reason.clone()),
         };
-        match verdict {
-            Ok(()) => {
-                let data = result.unwrap_or_default();
-                return Ok(Generated {
-                    script,
-                    rounds: round,
-                    blocks: data
-                        .blocks
-                        .into_iter()
-                        .map(|b| (b.label, b.value))
-                        .collect(),
-                });
+        if let (Ok(()), Ok(data)) = (&verdict, &result) {
+            let generated = Generated {
+                script,
+                rounds: round,
+                blocks: data
+                    .blocks
+                    .iter()
+                    .map(|b| (b.label.clone(), b.value.clone()))
+                    .collect(),
+            };
+            if bytes <= LIGHT_BYTES {
+                return Ok(generated);
             }
-            Err(problem) => {
-                tracing::debug!(service = %context.name, round, problem, "generated script rejected");
-                let mut note = feedback(&result, &traces);
-                if result.is_ok() {
-                    note.push_str(&format!("Not accepted: {problem}\n"));
-                }
-                last_problem = problem;
-                messages.push(json!({ "role": "assistant", "content": reply }));
-                messages.push(json!({ "role": "user", "content": note }));
+            if heavy.as_ref().is_none_or(|(best, _)| bytes < *best) {
+                heavy = Some((bytes, generated));
+            }
+            verdict = Err(format!(
+                "it works, but downloads {} kB on every refresh. Find a lighter way to get the same \
+numbers (a count or summary endpoint, a filter, a limit, field selection). If the API really has \
+none, send the same script again",
+                bytes / 1000
+            ));
+        }
+        if let Err(problem) = verdict {
+            tracing::debug!(service = %context.name, round, problem, "generated script rejected");
+            let mut note = feedback(&result, &traces);
+            if result.is_ok() {
+                note.push_str(&format!("Not accepted: {problem}\n"));
+            }
+            last_problem = problem;
+            messages.push(json!({ "role": "assistant", "content": reply }));
+            messages.push(json!({ "role": "user", "content": note }));
+        }
+        // Two tries at slimming a working script are enough.
+        if let Some((_, generated)) = &heavy {
+            if round >= generated.rounds + 2 {
+                break;
             }
         }
+    }
+    if let Some((bytes, generated)) = heavy {
+        tracing::info!(service = %context.name, bytes, "no lighter script found, keeping the working one");
+        return Ok(generated);
     }
     Err(format!(
         "no working script after {} rounds; last problem: {last_problem}",
@@ -492,7 +534,7 @@ fn major(tag: &str) -> Option<u64> {
 /// Hash of everything about a service that a script may depend on, so a
 /// changed annotation gets a new script.
 fn input_hash(service: &Service, spec: &WidgetSpec) -> String {
-    let mut text = format!("{}\n{}\n", service.name, spec.kind);
+    let mut text = format!("v{PROMPT_VERSION}\n{}\n{}\n", service.name, spec.kind);
     for (name, value) in &spec.params {
         text.push_str(&format!("{name}={value}\n"));
     }
@@ -1200,7 +1242,7 @@ mod tests {
         let note = second[3]["content"].as_str().unwrap();
         assert!(note.contains("The script failed: HTTP 404"), "{note}");
         assert!(
-            note.contains("GET http://trackhound.svc:8080/api/statz -> 404 not found"),
+            note.contains("GET http://trackhound.svc:8080/api/statz -> 404, 9 bytes: not found"),
             "{note}"
         );
 
@@ -1227,6 +1269,53 @@ mod tests {
         assert_eq!(
             error,
             "no working script after 3 rounds; last problem: return 1 to 4 blocks, got 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_heavy_script_is_slimmed_or_kept_as_the_fallback() {
+        let big = format!(
+            r#"{{"items":[{}]}}"#,
+            vec![r#"{"x":"0123456789012345678901234567890123456789"}"#; 8000].join(",")
+        );
+        let heavy_script = "```lua\nlocal d = http.get(\"/all\"):json()\nreturn { { label = \"Apps\", value = #d.items } }\n```";
+        let light_script = "```lua\nlocal d = http.get(\"/count\"):json()\nreturn { { label = \"Apps\", value = d.count } }\n```";
+        let service = || {
+            Arc::new(FakeHttp::new().on(Method::Get, "/all", 200, &big).on(
+                Method::Get,
+                "/count",
+                200,
+                r#"{"count":8000}"#,
+            ))
+        };
+        let cfg = config(&[("url", "http://svc")]);
+
+        // The model finds a lighter endpoint when told the size.
+        let model = ScriptedModel::new(&[heavy_script, light_script]);
+        let generated = generate_script(&model, service(), &settings(), &context(), &cfg)
+            .await
+            .unwrap();
+        assert!(generated.script.contains("/count"));
+        assert_eq!(generated.rounds, 2);
+        let note = model.requests.lock().unwrap()[1]["messages"][3]["content"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            note.contains("downloads 392 kB on every refresh"),
+            "{}",
+            &note[note.len().saturating_sub(300)..]
+        );
+
+        // It cannot: after two more tries the working script is kept.
+        let model = ScriptedModel::new(&[heavy_script, heavy_script, heavy_script]);
+        let generated = generate_script(&model, service(), &settings(), &context(), &cfg)
+            .await
+            .unwrap();
+        assert!(generated.script.contains("/all"));
+        assert_eq!(
+            generated.blocks,
+            vec![("Apps".to_string(), "8,000".to_string())]
         );
     }
 
@@ -1274,6 +1363,8 @@ mod tests {
         assert!(acceptable(&data(&[("A", "-"), ("B", "nil")])).is_err());
         assert!(acceptable(&data(&[("A", "-"), ("B", "3")])).is_ok());
         assert!(acceptable(&data(&[("A label that is far too long", "1")])).is_err());
+        assert!(acceptable(&data(&[("suwayomi.download", "1")])).is_err());
+        assert!(acceptable(&data(&[("Max. Down", "1")])).is_ok());
     }
 
     #[test]
