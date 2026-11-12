@@ -164,7 +164,7 @@ Things to know:
 - **Known applications work best.** With a gethomepage reference the model ports a working widget. For anything else it relies on the probes, an OpenAPI document if the service has one, and your hint.
 - **Use `widget.hint` when it gets something wrong**, for example to name the endpoint or say that no API key is set.
 - **A script is written again** when the service's widget annotations change, on a major version bump of its image, when the `Widget` is deleted or annotated `hugin.dev/regenerate`, or when the stored script fails two re-checks in a row. Re-checks run every `generator.revalidateHours`.
-- **A failed generation** leaves a `Widget` with `status.phase: Failed` and the reason, and is retried after `generator.retryHours`. A script that worked before is kept.
+- **A failed generation** leaves a `Widget` with `status.phase: Failed` and the reason. It is retried after ten minutes, then every `generator.retryHours`. A script that worked before is kept and stays in use.
 - **A script that downloads a lot** is sent back for a lighter one twice, then kept if the model finds none.
 - **Generated widgets no service asks for are deleted.**
 - **The dashboard does not need the generator.** It runs as a separate Deployment and only writes `Widget` resources.
