@@ -14,6 +14,7 @@ use crate::weather::Icon;
 
 pub const HEADER_RESOURCES_ID: &str = "hdr-resources";
 pub const HEADER_WEATHER_ID: &str = "hdr-weather";
+pub const HEADER_SUMMARY_ID: &str = "hdr-summary";
 
 const DASHBOARD_ICONS: &str = "https://cdn.jsdelivr.net/gh/homarr-labs/dashboard-icons";
 
@@ -25,11 +26,6 @@ fn svg(body: &str, class: &str) -> Markup {
     }
 }
 
-const SVG_SERVER: &str = r#"<rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>"#;
-const SVG_ALERT: &str = r#"<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>"#;
-const SVG_CLUSTER: &str = r#"<polygon points="12 2 20.5 6.5 22 15.5 16 22 8 22 2 15.5 3.5 6.5"/><circle cx="12" cy="12" r="3"/><line x1="12" y1="2" x2="12" y2="9"/><line x1="22" y1="15.5" x2="14.8" y2="13"/><line x1="2" y1="15.5" x2="9.2" y2="13"/>"#;
-const SVG_CPU: &str = r#"<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>"#;
-const SVG_MEMORY: &str = r#"<rect x="2" y="7" width="20" height="10" rx="1"/><line x1="6" y1="10" x2="6" y2="14"/><line x1="10" y1="10" x2="10" y2="14"/><line x1="14" y1="10" x2="14" y2="14"/><line x1="18" y1="10" x2="18" y2="14"/><line x1="5" y1="17" x2="5" y2="20"/><line x1="12" y1="17" x2="12" y2="20"/><line x1="19" y1="17" x2="19" y2="20"/>"#;
 const SVG_CLOUD_PATH: &str = r#"<path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25"/>"#;
 
 fn weather_icon(icon: Icon) -> Markup {
@@ -91,25 +87,21 @@ fn block(label: &str, value: Option<&str>) -> Markup {
     }
 }
 
-fn stats_row(health: &ServiceHealth) -> Markup {
-    if !matches!(health.status, PodStatus::Running | PodStatus::Partial) {
-        return html! { div.blocks { (block("Status", Some("Offline"))) } };
-    }
-    let (cpu, memory) = match health.usage {
-        None => (None, None),
-        Some(usage) => {
-            let cpu = if health.cpu_limit > 0.0 {
-                format::percent(100.0 * usage.cpu / health.cpu_limit)
-            } else {
-                format::number_max(usage.cpu, 4)
-            };
-            (Some(cpu), Some(format::bytes(usage.memory, false, None)))
-        }
+/// CPU cores and memory in use, kept small beside the name: on most cards
+/// they say "idle", so they must not compete with the widget's values.
+fn usage(health: &ServiceHealth) -> Markup {
+    let Some(usage) = health.usage else {
+        return html! {};
+    };
+    let cpu = if health.cpu_limit > 0.0 {
+        format::percent(100.0 * usage.cpu / health.cpu_limit)
+    } else {
+        format!("{:.2}", usage.cpu)
     };
     html! {
-        div.blocks {
-            (block("CPU", cpu.as_deref()))
-            (block("MEM", memory.as_deref()))
+        span.use {
+            span { (cpu) " cpu" }
+            span { (format::bytes(usage.memory, false, None)) }
         }
     }
 }
@@ -142,7 +134,7 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
             }
         },
         Some(WidgetState::Error(reason)) => html! {
-            div.werr title=(reason) { "API Error" span { (reason) } }
+            div.werr title=(reason) { b { "Widget failed" } (reason) }
         },
         Some(WidgetState::Pending(reason)) => html! {
             div.wpending title=(reason) { (reason) }
@@ -164,32 +156,43 @@ fn card(state: &AppState, service: &Service) -> Markup {
             p.desc { (description) }
         }
     };
+    // The same picture slot on every card keeps the names in one column.
+    let picture = match &service.icon {
+        Some(reference) => icon(reference),
+        None => {
+            html! { (service.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()) }
+        }
+    };
+    let tone = match health.as_ref().map(|h| h.status) {
+        None | Some(PodStatus::Running) => None,
+        Some(PodStatus::Down) => Some("down"),
+        Some(_) => Some("warn"),
+    };
+    let widget_failed = matches!(
+        state.widgets.lock().unwrap().get(&service.id),
+        Some(WidgetState::Error(_))
+    );
+    // The edge marks every card the summary names.
+    let edge = tone.or(widget_failed.then_some("warn"));
     html! {
-        li.svc #(service.id) data-name=(service.name) {
-            div.card {
+        li.svc #(service.id) data-name=(service.name) data-href=[href] {
+            div.card.(edge.unwrap_or("ok")) {
                 div.title {
-                    @if let Some(reference) = &service.icon {
-                        @if let Some(href) = href {
-                            a.icon href=(href) target="_blank" rel="noreferrer" tabindex="-1" aria-hidden="true" { (icon(reference)) }
-                        } @else {
-                            span.icon { (icon(reference)) }
-                        }
-                    }
                     @if let Some(href) = href {
+                        a.icon.mono[service.icon.is_none()] href=(href) target="_blank" rel="noreferrer" tabindex="-1" aria-hidden="true" { (picture) }
                         a.name href=(href) target="_blank" rel="noreferrer" { (title) }
                     } @else {
+                        span.icon.mono[service.icon.is_none()] aria-hidden="true" { (picture) }
                         span.name { (title) }
                     }
                     @if let Some(health) = &health {
-                        @let class = match health.status {
-                            PodStatus::Running => "ok",
-                            _ => "warn",
-                        };
-                        span.dot.(class) title=(health.status.label()) role="img" aria-label=(health.status.label()) {}
+                        @if state.cfg.show_stats { (usage(health)) }
+                        @match tone {
+                            // A healthy service gets a quiet dot; anything else says what is wrong.
+                            None => span.dot title=(health.status.label()) role="img" aria-label=(health.status.label()) {},
+                            Some(tone) => span.state.(tone) { (health.status.label()) },
+                        }
                     }
-                }
-                @if let (Some(health), true) = (&health, state.cfg.show_stats) {
-                    (stats_row(health))
                 }
                 (widget_rows(state, service))
             }
@@ -197,32 +200,34 @@ fn card(state: &AppState, service: &Service) -> Markup {
     }
 }
 
-fn bar(percent: f64) -> Markup {
-    let width = if percent.is_finite() {
+fn meter(label: &str, percent: f64) -> Markup {
+    let percent = if percent.is_finite() {
         percent.clamp(0.0, 100.0)
     } else {
         0.0
     };
-    html! { div.bar { div style=(format!("width:{width:.0}%")) {} } }
+    html! {
+        div.meter {
+            span { (label) }
+            div.bar.hot[percent >= 85.0] { div style=(format!("width:{percent:.0}%")) {} }
+            span { (format::percent(percent)) }
+        }
+    }
 }
 
 fn resource(
-    icon_svg: &str,
     label: &str,
+    ready: bool,
     cpu_percent: f64,
     memory_free: f64,
     memory_percent: f64,
 ) -> Markup {
+    let free = format!("{} memory free", format::bytes(memory_free, true, Some(0)));
     html! {
-        div.res {
-            (svg(icon_svg, "res-icon"))
-            div.res-body {
-                div.res-line { span { (format::percent(cpu_percent)) } (svg(SVG_CPU, "res-mini")) }
-                (bar(cpu_percent))
-                div.res-line { span { (format::bytes(memory_free, true, Some(0))) } (svg(SVG_MEMORY, "res-mini")) }
-                (bar(memory_percent))
-                div.res-label { (label) }
-            }
+        div.res.down[!ready] title=(free) {
+            div.res-name { (label) @if !ready { " is not ready" } }
+            (meter("cpu", cpu_percent))
+            (meter("mem", memory_percent))
         }
     }
 }
@@ -245,13 +250,13 @@ fn header_resources(state: &AppState) -> Markup {
                 @let mem_total: f64 = nodes.iter().map(|n| n.memory_capacity).sum();
                 @let cpu_used: f64 = nodes.iter().filter_map(|n| n.usage).map(|u| u.cpu).sum();
                 @let mem_used: f64 = nodes.iter().filter_map(|n| n.usage).map(|u| u.memory).sum();
-                (resource(SVG_CLUSTER, &header.cluster.label, percent_of(cpu_used, cpu_total),
+                (resource(&header.cluster.label, true, percent_of(cpu_used, cpu_total),
                           mem_total - mem_used, percent_of(mem_used, mem_total)))
             }
             @if header.nodes.show {
                 @for node in &nodes {
                     @let usage = node.usage.unwrap_or_default();
-                    (resource(if node.ready { SVG_SERVER } else { SVG_ALERT }, &node.name,
+                    (resource(&node.name, node.ready,
                               percent_of(usage.cpu, node.cpu_capacity),
                               node.memory_capacity - usage.memory,
                               percent_of(usage.memory, node.memory_capacity)))
@@ -267,10 +272,8 @@ fn header_weather(state: &AppState) -> Markup {
         div.weather #(HEADER_WEATHER_ID) {
             @if let Some(now) = weather {
                 (weather_icon(now.icon))
-                div {
-                    div.wx-primary { (now.primary) }
-                    div.wx-secondary { (now.condition) }
-                }
+                span.wx-primary { (now.primary) }
+                span { (now.condition) }
             }
         }
     }
@@ -280,23 +283,65 @@ fn search(state: &AppState) -> Markup {
     let Some(cfg) = &state.cfg.header.search else {
         return html! {};
     };
-    let (action, param, mark) = match cfg.provider.as_str() {
-        "duckduckgo" => ("https://duckduckgo.com/", "q", "D"),
-        "bing" => ("https://www.bing.com/search", "q", "B"),
-        "brave" => ("https://search.brave.com/search", "q", "B"),
+    let (action, engine) = match cfg.provider.as_str() {
+        "duckduckgo" => ("https://duckduckgo.com/", "DuckDuckGo"),
+        "bing" => ("https://www.bing.com/search", "Bing"),
+        "brave" => ("https://search.brave.com/search", "Brave"),
         "custom" => (
             cfg.url
                 .as_deref()
                 .unwrap_or("https://www.google.com/search"),
-            "q",
-            "↵",
+            "the web",
         ),
-        _ => ("https://www.google.com/search", "q", "G"),
+        _ => ("https://www.google.com/search", "Google"),
     };
+    let hint = format!("Find a service or search {engine}");
+    // Typing narrows the cards (see app.js); Enter opens the only match,
+    // or sends the text to the search engine.
     html! {
         form.search action=(action) method="get" target=(cfg.target) role="search" {
-            input type="search" name=(param) placeholder="Search…" aria-label="Search" autocomplete="off" autofocus;
-            button type="submit" title=(format!("Search engine: {}", cfg.provider)) { (mark) }
+            input type="search" name="q" placeholder=(hint) aria-label=(hint) autocomplete="off" autofocus;
+            kbd aria-hidden="true" { "/" }
+        }
+    }
+}
+
+/// Names listed in the summary before it says "and N more".
+const SUMMARY_NAMES: usize = 4;
+
+/// The first thing on the page: whether anything needs looking at, and what.
+fn summary(state: &AppState) -> Markup {
+    let widgets = state.widgets.lock().unwrap().clone();
+    let mut total = 0;
+    let mut troubled: Vec<(String, String)> = Vec::new();
+    let mut any_down = false;
+    for (_, services) in state.grouped_services() {
+        for service in services {
+            total += 1;
+            let status = service.kube.as_ref().map(|k| state.health(k).status);
+            let down = status.is_some_and(|status| status != PodStatus::Running);
+            any_down |= status == Some(PodStatus::Down);
+            let failed = matches!(widgets.get(&service.id), Some(WidgetState::Error(_)));
+            if down || failed {
+                troubled.push((service.id.clone(), service.name.clone()));
+            }
+        }
+    }
+    html! {
+        // The stylesheet tints the page from these classes.
+        p.summary.warn[!troubled.is_empty() && !any_down].down[any_down] #(HEADER_SUMMARY_ID) {
+            @if troubled.is_empty() {
+                @if total == 1 { "The one service is running" } @else { "All " (total) " services are running" }
+            } @else {
+                (troubled.len()) " of " (total) " services need attention: "
+                @for (i, (id, name)) in troubled.iter().take(SUMMARY_NAMES).enumerate() {
+                    @if i > 0 { ", " }
+                    a href=(format!("#{id}")) { (name) }
+                }
+                @if troubled.len() > SUMMARY_NAMES {
+                    " and " (troubled.len() - SUMMARY_NAMES) " more"
+                }
+            }
         }
     }
 }
@@ -344,6 +389,10 @@ pub fn build_view(state: &AppState) -> View {
     view.fragments.insert(
         Arc::from(HEADER_RESOURCES_ID),
         Arc::from(header_resources(state).into_string()),
+    );
+    view.fragments.insert(
+        Arc::from(HEADER_SUMMARY_ID),
+        Arc::from(summary(state).into_string()),
     );
     view.fragments.insert(
         Arc::from(HEADER_WEATHER_ID),
@@ -419,8 +468,9 @@ pub fn page(state: &AppState) -> String {
             }
             body data-version=(version) style=(format!("--cols:{columns}")) {
                 header.top {
-                    (fragment(HEADER_RESOURCES_ID))
+                    (fragment(HEADER_SUMMARY_ID))
                     (fragment(HEADER_WEATHER_ID))
+                    (fragment(HEADER_RESOURCES_ID))
                     (search(state))
                 }
                 main.groups {
@@ -554,9 +604,15 @@ mod tests {
         assert!(html.contains("dashboard-icons/png/argo-cd.png"));
         assert!(html.contains(r#"action="https://www.google.com/search""#));
         assert!(html.contains("github.com"));
-        // No pods known: orange dot, and stats say Offline.
-        assert!(html.contains(r#"class="dot warn" title="not found""#));
-        assert!(html.contains("Offline"));
+        // No pods known: the card and the summary both say so.
+        assert!(html.contains(r#"<span class="state warn">not found</span>"#));
+        assert!(html.contains("1 of 2 services need attention: "));
+        assert!(html.contains(&format!(
+            r##"<a href="#{}">Argo &lt;CD&gt;</a>"##,
+            service.id
+        )));
+        // A card without an icon gets its initial instead.
+        assert!(html.contains(r#"class="icon mono""#));
     }
 
     #[test]
@@ -599,8 +655,11 @@ mod tests {
             .into(),
         );
         let html = card(&state, &service).into_string();
-        assert!(html.contains(r#"class="dot ok" title="running""#));
-        assert!(html.contains("0.0314"));
+        assert!(html.contains(r#"class="dot" title="running""#));
+        assert!(html.contains("0.03 cpu"));
+        assert!(summary(&state)
+            .into_string()
+            .contains("All 2 services are running"));
         assert!(html.contains("1.54 GB"));
     }
 
@@ -636,7 +695,7 @@ mod tests {
         let html = card(&state, &service).into_string();
         assert!(html.contains(r#"class="wpending""#));
         assert!(html.contains("no widget for ghcr.io/x/y yet"));
-        assert!(!html.contains("API Error"));
+        assert!(!html.contains("Widget failed"));
         assert_eq!(
             snapshot(&state)["groups"][0]["services"][0]["widget"]["pending"],
             "no widget for ghcr.io/x/y yet"
@@ -652,8 +711,36 @@ mod tests {
             .unwrap()
             .insert(service.id.clone(), WidgetState::Error("HTTP 401".into()));
         let html = card(&state, &service).into_string();
-        assert!(html.contains("API Error"));
+        assert!(html.contains("Widget failed"));
         assert!(html.contains("HTTP 401"));
+        assert!(html.contains(r#"class="card warn""#));
+        assert!(summary(&state).into_string().contains("need attention"));
+    }
+
+    #[test]
+    fn a_long_list_of_troubled_services_is_cut_short() {
+        let (state, _) = state_with_service();
+        for n in 0..6 {
+            let ann = [
+                ("gethomepage.dev/enabled", "true".to_string()),
+                ("gethomepage.dev/name", format!("App {n}")),
+                ("gethomepage.dev/pod-selector", "app=x".to_string()),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+            let service =
+                service_from_annotations("ingress", "ns", &format!("app{n}"), &ann, None).unwrap();
+            state
+                .discovered
+                .lock()
+                .unwrap()
+                .insert(format!("ingress/ns/app{n}"), service);
+        }
+        let html = summary(&state).into_string();
+        assert!(html.contains("7 of 8 services need attention: "), "{html}");
+        assert_eq!(html.matches("<a href").count(), SUMMARY_NAMES);
+        assert!(html.contains(" and 3 more"));
     }
 
     #[test]
