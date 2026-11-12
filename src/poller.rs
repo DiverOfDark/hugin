@@ -86,13 +86,24 @@ pub async fn resolve(
     Ok((cfg, source))
 }
 
+/// Failures of the network path rather than of the service. After an idle
+/// period the first requests of a cycle can hit these (cold DNS and
+/// connection paths), and a second try moments later succeeds.
+fn is_transport_failure(reason: &str) -> bool {
+    matches!(reason, "timeout" | "connection failed" | "request failed")
+}
+
+/// Refreshes one widget. Returns the credential source and whether the
+/// refresh should be tried again: on a transport failure, unless this is
+/// the `last_try`, nothing is recorded yet.
 async fn refresh_widget(
     state: &AppState,
     http: &Arc<dyn Http>,
     secrets: &SecretReader,
     service: &Service,
     spec: &WidgetSpec,
-) -> CredentialSource {
+    last_try: bool,
+) -> (CredentialSource, bool) {
     let started = Instant::now();
     let mut source = CredentialSource::None;
     let widget = match state.resolve_widget(service, &spec.kind) {
@@ -104,13 +115,13 @@ async fn refresh_widget(
                 widgets.insert(service.id.clone(), new_state);
                 state.dirty.notify_one();
             }
-            return source;
+            return (source, false);
         }
         Resolved::Missing(reason) => {
             if record_result(state, &service.id, Err(reason)) {
                 state.dirty.notify_one();
             }
-            return source;
+            return (source, false);
         }
     };
     let result = match resolve(spec, secrets).await {
@@ -126,6 +137,12 @@ async fn refresh_widget(
             }
         }
     };
+
+    if let (Err(reason), false) = (&result, last_try) {
+        if is_transport_failure(reason) {
+            return (source, true);
+        }
+    }
 
     let outcome = if result.is_ok() { "ok" } else { "error" };
     state
@@ -147,7 +164,7 @@ async fn refresh_widget(
     if record_result(state, &service.id, result) {
         state.dirty.notify_one();
     }
-    source
+    (source, false)
 }
 
 /// Stores a refresh result and reports whether the card changed. A widget
@@ -200,10 +217,26 @@ pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Ar
             let (state, http, secrets, limit) = (&state, &http, &secrets, &limit);
             async move {
                 let _permit = limit.acquire().await;
-                refresh_widget(state, http, secrets, service, spec).await
+                refresh_widget(state, http, secrets, service, spec, false).await
             }
         });
-        let sources: Vec<CredentialSource> = futures::future::join_all(refreshes).await;
+        let first_pass = futures::future::join_all(refreshes).await;
+
+        // Second and last try for the ones that failed on the way there.
+        let retries = services
+            .iter()
+            .zip(&first_pass)
+            .filter(|(_, (_, retry))| *retry)
+            .map(|((service, spec), _)| {
+                let (state, http, secrets, limit) = (&state, &http, &secrets, &limit);
+                async move {
+                    let _permit = limit.acquire().await;
+                    refresh_widget(state, http, secrets, service, spec, true).await
+                }
+            });
+        futures::future::join_all(retries).await;
+        let sources: Vec<CredentialSource> =
+            first_pass.into_iter().map(|(source, _)| source).collect();
 
         for source in [
             CredentialSource::Secret,
@@ -403,6 +436,84 @@ mod tests {
             "stale marker removed"
         );
         assert!(state.widget_failures.lock().unwrap().is_empty());
+    }
+
+    /// Fails the first `failures` requests with a timeout, then answers.
+    struct Flaky {
+        failures: std::sync::atomic::AtomicUsize,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl Http for Flaky {
+        async fn send(
+            &self,
+            _request: crate::widgets::Request,
+        ) -> Result<crate::widgets::Response, crate::widgets::WidgetError> {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let left = self.failures.load(Ordering::Relaxed);
+            if left > 0 {
+                self.failures.store(left - 1, Ordering::Relaxed);
+                return Err(crate::widgets::WidgetError::new("timeout"));
+            }
+            Ok(crate::widgets::Response {
+                status: 200,
+                body: br#"{"http":{"routers":{"total":1},"services":{"total":2},"middlewares":{"total":3}}}"#.to_vec(),
+                cookies: vec![],
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_failure_is_retried_before_anything_is_recorded() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let state = AppState::new(crate::config::Config::default());
+        let service = Service {
+            id: "s".into(),
+            group: "g".into(),
+            name: "Traefik".into(),
+            href: None,
+            icon: None,
+            description: None,
+            weight: 0,
+            kube: None,
+            widget: None,
+        };
+        let mut spec = spec(&[("url", "http://traefik")], &[]);
+        spec.kind = "traefik".into();
+        let flaky = Arc::new(Flaky {
+            failures: AtomicUsize::new(1),
+            calls: AtomicUsize::new(0),
+        });
+        let http: Arc<dyn Http> = flaky.clone();
+
+        let (_, retry) = refresh_widget(&state, &http, &offline(), &service, &spec, false).await;
+        assert!(retry);
+        assert!(
+            state.widgets.lock().unwrap().is_empty(),
+            "nothing recorded yet"
+        );
+
+        let (_, retry) = refresh_widget(&state, &http, &offline(), &service, &spec, true).await;
+        assert!(!retry);
+        assert!(matches!(
+            state.widgets.lock().unwrap().get("s"),
+            Some(WidgetState::Data(_))
+        ));
+        assert_eq!(flaky.calls.load(Ordering::Relaxed), 2);
+
+        // On the last try a transport failure is recorded like any other.
+        flaky.failures.store(5, Ordering::Relaxed);
+        state.widgets.lock().unwrap().clear();
+        let (_, retry) = refresh_widget(&state, &http, &offline(), &service, &spec, true).await;
+        assert!(!retry);
+        assert_eq!(
+            state.widgets.lock().unwrap().get("s"),
+            Some(&WidgetState::Error("timeout".into()))
+        );
+        // Service errors are not retried.
+        assert!(!is_transport_failure("HTTP 500"));
     }
 
     #[tokio::test]
