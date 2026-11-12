@@ -157,12 +157,19 @@ fn card(state: &AppState, service: &Service) -> Markup {
         }
     };
     // The same picture slot on every card keeps the names in one column.
-    let picture = match &service.icon {
-        Some(reference) => icon(reference),
-        None => {
-            html! { (service.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()) }
-        }
+    let favicon = crate::favicon::url(state, service);
+    let favicon_first = state.cfg.favicons == crate::config::Favicons::Prefer;
+    let picture = match (&favicon, &service.icon) {
+        (Some(url), reference) if favicon_first || reference.is_none() => Some(html! {
+            img src=(url) width="32" height="32" alt="" loading="lazy";
+        }),
+        (_, Some(reference)) => Some(icon(reference)),
+        _ => None,
     };
+    let initial = picture.is_none();
+    let picture = picture.unwrap_or_else(|| {
+        html! { (service.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()) }
+    });
     let tone = match health.as_ref().map(|h| h.status) {
         None | Some(PodStatus::Running) => None,
         Some(PodStatus::Down) => Some("down"),
@@ -179,10 +186,10 @@ fn card(state: &AppState, service: &Service) -> Markup {
             div.card.(edge.unwrap_or("ok")) {
                 div.title {
                     @if let Some(href) = href {
-                        a.icon.mono[service.icon.is_none()] href=(href) target="_blank" rel="noreferrer" tabindex="-1" aria-hidden="true" { (picture) }
+                        a.icon.mono[initial] href=(href) target="_blank" rel="noreferrer" tabindex="-1" aria-hidden="true" { (picture) }
                         a.name href=(href) target="_blank" rel="noreferrer" { (title) }
                     } @else {
-                        span.icon.mono[service.icon.is_none()] aria-hidden="true" { (picture) }
+                        span.icon.mono[initial] aria-hidden="true" { (picture) }
                         span.name { (title) }
                     }
                     @if let Some(health) = &health {
@@ -538,6 +545,7 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                         "namespace": s.kube.as_ref().map(|k| k.namespace.clone()),
                         "podSelector": s.kube.as_ref().map(|k| k.pod_selector.clone()),
                         "status": health.map(|h| h.status.label()),
+                        "favicon": crate::favicon::url(state, s).is_some(),
                         "cpu": health.and_then(|h| h.usage).map(|u| u.cpu),
                         "memory": health.and_then(|h| h.usage).map(|u| u.memory),
                         "widget": widget,
@@ -715,6 +723,39 @@ mod tests {
         assert!(html.contains("HTTP 401"));
         assert!(html.contains(r#"class="card warn""#));
         assert!(summary(&state).into_string().contains("need attention"));
+    }
+
+    #[test]
+    fn a_cached_favicon_fills_in_for_a_missing_icon() {
+        let (state, with_icon) = state_with_service();
+        let garage = state.static_services[0].clone();
+        assert!(card(&state, &garage)
+            .into_string()
+            .contains(r#"class="icon mono""#));
+        for service in [&garage, &with_icon] {
+            state.favicons.lock().unwrap().insert(
+                service.id.clone(),
+                crate::favicon::Entry {
+                    icon: Some(crate::favicon::Icon {
+                        bytes: Arc::from(&b"GIF89a"[..]),
+                        mime: "image/gif",
+                        version: "abc".into(),
+                    }),
+                    source: service.href.clone().unwrap(),
+                    refresh_at: std::time::Instant::now(),
+                },
+            );
+        }
+        let html = card(&state, &garage).into_string();
+        assert!(
+            html.contains(&format!(r#"src="/icons/{}?v=abc""#, garage.id)),
+            "{html}"
+        );
+        assert!(!html.contains("mono"));
+        // An icon that was chosen by hand stays.
+        let html = card(&state, &with_icon).into_string();
+        assert!(html.contains("dashboard-icons/png/argo-cd.png"));
+        assert!(!html.contains("/icons/"));
     }
 
     #[test]

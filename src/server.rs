@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -43,6 +43,7 @@ pub fn public_router(state: Arc<AppState>) -> Router {
             get(|| asset("text/javascript; charset=utf-8", SCRIPT)),
         )
         .route("/favicon.svg", get(|| asset("image/svg+xml", FAVICON)))
+        .route("/icons/{id}", get(icon))
         .route("/healthz", get(healthz))
         .with_state(state)
 }
@@ -64,6 +65,39 @@ async fn asset(content_type: &'static str, body: &'static str) -> Response {
             ),
         ],
         body,
+    )
+        .into_response()
+}
+
+/// A cached favicon. The bytes came from another service, so the browser is
+/// told to treat them as a picture and nothing else.
+async fn icon(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Response {
+    let icon = state
+        .favicons
+        .lock()
+        .unwrap()
+        .get(&id)
+        .and_then(|entry| entry.icon.clone());
+    let Some(icon) = icon else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [
+            (CONTENT_TYPE, HeaderValue::from_static(icon.mime)),
+            (
+                CACHE_CONTROL,
+                HeaderValue::from_static("public, max-age=86400"),
+            ),
+            (
+                HeaderName::from_static("content-security-policy"),
+                HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
+            ),
+            (
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            ),
+        ],
+        icon.bytes.to_vec(),
     )
         .into_response()
 }
