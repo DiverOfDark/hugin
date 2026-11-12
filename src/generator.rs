@@ -915,6 +915,18 @@ struct Memory {
     check_at: HashMap<(String, String), Instant>,
     /// Consecutive failed re-checks.
     strikes: HashMap<(String, String), u32>,
+    /// Consecutive failed generations.
+    failures: HashMap<(String, String), u32>,
+}
+
+/// A first failure is often the model having an off day: try again soon.
+/// After that, wait the configured time.
+fn retry_delay(failures: u32, retry_after: Duration) -> Duration {
+    if failures <= 1 {
+        retry_after.min(Duration::from_secs(600))
+    } else {
+        retry_after
+    }
 }
 
 /// The controller loop.
@@ -1041,10 +1053,17 @@ async fn cycle(
         let Some(reason) = reason else {
             continue;
         };
-        if memory
-            .retry_at
-            .get(&key)
-            .is_some_and(|at| *at > Instant::now())
+        // The owner asking, by annotation or by changing the service's
+        // annotations, is not held back by an earlier failure.
+        let asked = matches!(
+            reason,
+            "regeneration requested" | "widget annotations changed"
+        );
+        if !asked
+            && memory
+                .retry_at
+                .get(&key)
+                .is_some_and(|at| *at > Instant::now())
         {
             continue;
         }
@@ -1060,15 +1079,19 @@ async fn cycle(
         match &outcome {
             Ok(generated) => {
                 memory.retry_at.remove(&key);
+                memory.failures.remove(&key);
                 memory
                     .check_at
                     .insert(key.clone(), Instant::now() + settings.revalidate_after);
                 tracing::info!(service = %target.service.name, rounds = generated.rounds, blocks = ?generated.blocks, "widget generated");
             }
             Err(reason) => {
-                memory
-                    .retry_at
-                    .insert(key.clone(), Instant::now() + settings.retry_after);
+                let failures = memory.failures.entry(key.clone()).or_insert(0);
+                *failures += 1;
+                memory.retry_at.insert(
+                    key.clone(),
+                    Instant::now() + retry_delay(*failures, settings.retry_after),
+                );
                 tracing::warn!(service = %target.service.name, reason, "widget generation failed");
             }
         }
@@ -1548,6 +1571,17 @@ mod tests {
         assert!(reference(&http, "https://raw.example/homepage", "../x")
             .await
             .is_none());
+    }
+
+    #[test]
+    fn first_failure_retries_soon_later_ones_wait() {
+        let six_hours = Duration::from_secs(6 * 3600);
+        assert_eq!(retry_delay(1, six_hours), Duration::from_secs(600));
+        assert_eq!(retry_delay(2, six_hours), six_hours);
+        assert_eq!(
+            retry_delay(1, Duration::from_secs(60)),
+            Duration::from_secs(60)
+        );
     }
 
     #[test]
