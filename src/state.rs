@@ -263,8 +263,8 @@ impl AppState {
         })
     }
 
-    /// Pod status exactly as gethomepage computes it (pod phase, not
-    /// readiness), plus summed usage of the matching pods.
+    /// Pod status from pod phase (not readiness), plus summed usage of the
+    /// matching pods.
     pub fn health(&self, kube: &KubeRef) -> ServiceHealth {
         let selector = Selector::parse(&kube.pod_selector);
         let pods = self.pods.lock().unwrap();
@@ -278,11 +278,21 @@ impl AppState {
             .unwrap_or_default();
 
         let up = |p: &PodInfo| p.phase == "Running" || p.phase == "Succeeded";
+        // A Failed pod never comes back: its controller has already made a
+        // replacement, and Kubernetes keeps the corpse around (after a node
+        // shutdown, for instance). It only counts when nothing else is left.
+        let alive: Vec<&PodInfo> = matching
+            .iter()
+            .map(|(_, p)| *p)
+            .filter(|p| p.phase != "Failed")
+            .collect();
         let status = if matching.is_empty() {
             PodStatus::NotFound
-        } else if matching.iter().all(|(_, p)| up(p)) {
+        } else if alive.is_empty() {
+            PodStatus::Down
+        } else if alive.iter().all(|p| up(p)) {
             PodStatus::Running
-        } else if matching.iter().any(|(_, p)| up(p)) {
+        } else if alive.iter().any(|p| up(p)) {
             PodStatus::Partial
         } else {
             PodStatus::Down
@@ -412,6 +422,11 @@ mod tests {
         ns.insert("b-1".to_string(), pod("Running", "b", 0.0));
         ns.insert("b-2".to_string(), pod("Pending", "b", 0.0));
         ns.insert("c-1".to_string(), pod("Failed", "c", 0.0));
+        // Left behind by a node shutdown, next to its replacement.
+        ns.insert("d-old".to_string(), pod("Failed", "d", 0.0));
+        ns.insert("d-new".to_string(), pod("Running", "d", 0.0));
+        ns.insert("e-old".to_string(), pod("Failed", "e", 0.0));
+        ns.insert("e-new".to_string(), pod("Pending", "e", 0.0));
         state.pods.lock().unwrap().insert("ns".into(), ns);
 
         let a = state.health(&kube_ref("app=a"));
@@ -420,6 +435,8 @@ mod tests {
         assert_eq!(a.usage, None, "no metrics fetched yet");
         assert_eq!(state.health(&kube_ref("app=b")).status, PodStatus::Partial);
         assert_eq!(state.health(&kube_ref("app=c")).status, PodStatus::Down);
+        assert_eq!(state.health(&kube_ref("app=d")).status, PodStatus::Running);
+        assert_eq!(state.health(&kube_ref("app=e")).status, PodStatus::Down);
 
         let mut usage = HashMap::new();
         usage.insert(
