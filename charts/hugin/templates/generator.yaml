@@ -117,14 +117,14 @@ spec:
                   key: {{ required "generator.apiKeySecret.key is required when the generator is enabled" .Values.generator.apiKeySecret.key }}
             - name: HUGIN_GENERATE_INTERVAL
               value: {{ .Values.generator.intervalSeconds | quote }}
-            - name: HUGIN_GENERATE_ROUNDS
-              value: {{ .Values.generator.rounds | quote }}
+            - name: HUGIN_AI_WEB_SEARCH
+              value: {{ .Values.generator.webSearch | quote }}
+            - name: HUGIN_GENERATE_STEPS
+              value: {{ .Values.generator.steps | quote }}
             - name: HUGIN_GENERATE_RETRY_HOURS
               value: {{ .Values.generator.retryHours | quote }}
             - name: HUGIN_GENERATE_REVALIDATE_HOURS
               value: {{ .Values.generator.revalidateHours | quote }}
-            - name: HUGIN_REFERENCE_URL
-              value: {{ .Values.generator.referenceUrl | quote }}
             - name: HUGIN_CONFIGMAP
               value: {{ include "hugin.fullname" . | quote }}
             - name: RUST_LOG

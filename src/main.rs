@@ -69,11 +69,11 @@ struct ServeArgs {
 
 #[derive(clap::Args, Debug, Clone)]
 struct AiArgs {
-    /// Chat-completions endpoint of an OpenAI-compatible API.
+    /// Endpoint of a Responses API.
     #[arg(
         long,
         env = "HUGIN_AI_URL",
-        default_value = "https://api.openai.com/v1/chat/completions"
+        default_value = "https://api.openai.com/v1/responses"
     )]
     ai_url: String,
 
@@ -83,23 +83,23 @@ struct AiArgs {
     #[arg(long, env = "HUGIN_AI_KEY", hide_env_values = true)]
     ai_key: String,
 
-    /// Passed through as `reasoning_effort` when set.
+    /// Passed through as `reasoning.effort` when set.
     #[arg(long, env = "HUGIN_AI_REASONING_EFFORT")]
     ai_reasoning_effort: Option<String>,
 
-    /// Attempts the model gets per service.
-    #[arg(long, env = "HUGIN_GENERATE_ROUNDS", default_value_t = 6)]
-    rounds: u32,
+    /// Model replies allowed per service. Each reply can search the web,
+    /// run scripts against the service, or hand one in.
+    #[arg(long, env = "HUGIN_GENERATE_STEPS", default_value_t = 20)]
+    steps: u32,
 
-    /// Raw base URL of the gethomepage sources. Its implementation of a
-    /// `widget.type` is given to the model as the reference to port. Set
-    /// to an empty string to disable.
+    /// Offer the provider's hosted web search tool to the model.
     #[arg(
         long,
-        env = "HUGIN_REFERENCE_URL",
-        default_value = "https://raw.githubusercontent.com/gethomepage/homepage/main"
+        env = "HUGIN_AI_WEB_SEARCH",
+        default_value_t = true,
+        action = clap::ArgAction::Set
     )]
-    reference_url: String,
+    web_search: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -210,13 +210,13 @@ fn settings(ai: AiArgs, namespace: String) -> generator::Settings {
         reasoning_effort: ai.ai_reasoning_effort.filter(|e| !e.is_empty()),
         namespace,
         interval: Duration::from_secs(60),
-        max_rounds: ai.rounds.clamp(1, 12),
+        max_steps: ai.steps.clamp(1, 40),
+        web_search: ai.web_search,
         retry_after: Duration::ZERO,
         revalidate_after: Duration::ZERO,
         traefik_ingress_routes: false,
         static_services: Vec::new(),
         config_map: None,
-        reference_url: ai.reference_url,
     }
 }
 
@@ -244,8 +244,9 @@ async fn draft(args: DraftArgs) -> anyhow::Result<()> {
     )
     .await?;
     eprintln!(
-        "# accepted after {} round(s); the card shows: {}",
+        "# accepted after {} step(s) and {} web search(es); the card shows: {}",
         generated.rounds,
+        generated.searches,
         generated
             .blocks
             .iter()

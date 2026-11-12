@@ -68,23 +68,24 @@ crds:
 # It is a separate Deployment; the dashboard itself never talks to the model.
 generator:
   enabled: false
-  # Chat-completions endpoint of an OpenAI-compatible API.
-  apiUrl: https://api.openai.com/v1/chat/completions
+  # Endpoint of a Responses API.
+  apiUrl: https://api.openai.com/v1/responses
   model: ""
-  # Sent as `reasoning_effort` when set (low, medium, high).
+  # Sent as `reasoning.effort` when set (low, medium, high). The model works
+  # as an agent here; medium is a good start.
   reasoningEffort: ""
+  # Offer the provider's hosted web search tool to the model, so it can look
+  # up the API of the application it writes a widget for.
+  webSearch: true
   # Secret holding the API key.
   apiKeySecret:
     name: ""
     key: ""
-  # Raw base URL of the gethomepage sources. When a service's widget.type is
-  # a gethomepage widget type, its implementation there is given to the model
-  # as the reference to port. Set to "" to disable.
-  referenceUrl: https://raw.githubusercontent.com/gethomepage/homepage/main
   # Seconds between scans for services without a widget.
   intervalSeconds: 60
-  # Attempts the model gets per service.
-  rounds: 6
+  # Replies the model gets per service. Each one can search the web, run
+  # scripts against the service, or hand one in.
+  steps: 20
   # Hours before a failed service is tried again.
   retryHours: 6
   # Hours between runs of a stored script to check it still works. A script
