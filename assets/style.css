@@ -167,6 +167,9 @@ h2::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
 .abbr img, .abbr .icon-mask { width: 18px; height: 18px; }
 .bm-host { font: 400 0.75rem var(--mono); color: var(--muted); }
 
+.foot { margin: 2.5rem 0.375rem 0; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 0.75rem; color: var(--muted); }
+.foot a:hover { color: var(--text); }
+
 @media (max-width: 760px) {
   .top { grid-template-columns: 1fr; }
   .summary { font-size: 1.0625rem; line-height: 1.5rem; }
