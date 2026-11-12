@@ -284,23 +284,28 @@ pub async fn watch_widgets(state: Arc<AppState>, client: Client) {
     fn entry(widget: &WidgetResource) -> Option<((String, String), Option<CustomWidget>)> {
         let namespace = widget.metadata.namespace.clone()?;
         let name = widget.metadata.name.clone()?;
-        let custom = widget
+        let script = widget
             .spec
             .script
             .as_deref()
-            .filter(|script| !script.trim().is_empty())
-            .map(|script| CustomWidget {
-                image: widget.spec.image.clone().filter(|i| !i.is_empty()),
-                widget: Arc::new(LuaWidget::new(format!("{namespace}/{name}"), script)),
-            });
-        Some(((namespace, name), custom))
+            .filter(|script| !script.trim().is_empty());
+        let status = widget.status.clone().unwrap_or_default();
+        let custom = CustomWidget {
+            widget: script
+                .map(|script| Arc::new(LuaWidget::new(format!("{namespace}/{name}"), script))),
+            failure: (status.phase.as_deref() == Some("Failed"))
+                .then(|| status.message.unwrap_or_else(|| "generation failed".into())),
+        };
+        Some(((namespace, name), Some(custom)))
     }
 
     fn apply(state: &AppState, key: (String, String), new: Option<CustomWidget>) {
         let mut widgets = state.custom_widgets.lock().unwrap();
         let changed = match (widgets.get(&key), &new) {
             (Some(old), Some(new)) => {
-                old.image != new.image || old.widget.script() != new.widget.script()
+                old.failure != new.failure
+                    || old.widget.as_ref().map(|w| w.script())
+                        != new.widget.as_ref().map(|w| w.script())
             }
             (None, None) => false,
             _ => true,
@@ -380,12 +385,6 @@ fn pod_info(pod: &PodLite) -> Option<(String, String, PodInfo)> {
             .and_then(|s| s.phase.clone())
             .unwrap_or_default(),
         cpu_limit,
-        images: pod
-            .spec
-            .containers
-            .iter()
-            .filter_map(|c| c.image.clone())
-            .collect(),
     };
     Some((namespace, name, info))
 }
@@ -538,7 +537,6 @@ mod tests {
         assert_eq!((ns.as_str(), name.as_str()), ("apps", "web-1"));
         assert_eq!(info.phase, "Running");
         assert_eq!(info.cpu_limit, 1.5);
-        assert_eq!(info.images, vec!["x", "y", "z"]);
         assert_eq!(info.labels["app"], "web");
     }
 

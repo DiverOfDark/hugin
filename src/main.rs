@@ -90,6 +90,16 @@ struct AiArgs {
     /// Attempts the model gets per service.
     #[arg(long, env = "HUGIN_GENERATE_ROUNDS", default_value_t = 6)]
     rounds: u32,
+
+    /// Raw base URL of the gethomepage sources. Its implementation of a
+    /// `widget.type` is given to the model as the reference to port. Set
+    /// to an empty string to disable.
+    #[arg(
+        long,
+        env = "HUGIN_REFERENCE_URL",
+        default_value = "https://raw.githubusercontent.com/gethomepage/homepage/main"
+    )]
+    reference_url: String,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -104,6 +114,14 @@ struct DraftArgs {
     /// What you would like the card to show.
     #[arg(long)]
     hint: Option<String>,
+
+    /// Use this `widget.type` instead of the Ingress's annotation.
+    #[arg(long = "type")]
+    kind: Option<String>,
+
+    /// Use this service name instead of the Ingress's.
+    #[arg(long)]
+    name: Option<String>,
 
     #[command(flatten)]
     ai: AiArgs,
@@ -130,6 +148,15 @@ struct GenerateArgs {
     /// Hours to wait before retrying a service whose generation failed.
     #[arg(long, env = "HUGIN_GENERATE_RETRY_HOURS", default_value_t = 6)]
     retry_hours: u64,
+
+    /// Hours between runs of a stored script to see that it still works.
+    #[arg(long, env = "HUGIN_GENERATE_REVALIDATE_HOURS", default_value_t = 12)]
+    revalidate_hours: u64,
+
+    /// ConfigMap in the namespace that owns the widgets generated for
+    /// static services, so they are listed under it.
+    #[arg(long, env = "HUGIN_CONFIGMAP")]
+    config_map: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -162,36 +189,34 @@ async fn generate(args: GenerateArgs) -> anyhow::Result<()> {
     // Model calls are slow compared to a status API.
     let llm: Arc<dyn widgets::Http> = Arc::new(http::Client::new(Duration::from_secs(300))?);
     let client = kube::Client::try_default().await?;
-    let settings = settings(
-        args.ai,
-        args.namespace,
-        Duration::from_secs(args.interval.max(10)),
-        Duration::from_secs(args.retry_hours * 3600),
-        cfg.discovery.traefik_ingress_routes,
-    );
+    let mut settings = settings(args.ai, args.namespace);
+    settings.interval = Duration::from_secs(args.interval.max(10));
+    settings.retry_after = Duration::from_secs(args.retry_hours * 3600);
+    settings.revalidate_after = Duration::from_secs(args.revalidate_hours.max(1) * 3600);
+    settings.traefik_ingress_routes = cfg.discovery.traefik_ingress_routes;
+    settings.static_services = cfg.static_services();
+    settings.config_map = args.config_map.filter(|name| !name.is_empty());
     tokio::select! {
         result = generator::run(client, llm, service_http, settings) => result,
         _ = shutdown_signal() => Ok(()),
     }
 }
 
-fn settings(
-    ai: AiArgs,
-    namespace: String,
-    interval: Duration,
-    retry_after: Duration,
-    traefik_ingress_routes: bool,
-) -> generator::Settings {
+fn settings(ai: AiArgs, namespace: String) -> generator::Settings {
     generator::Settings {
         api_url: ai.ai_url,
         model: ai.ai_model,
         api_key: ai.ai_key,
         reasoning_effort: ai.ai_reasoning_effort.filter(|e| !e.is_empty()),
         namespace,
-        interval,
+        interval: Duration::from_secs(60),
         max_rounds: ai.rounds.clamp(1, 12),
-        retry_after,
-        traefik_ingress_routes,
+        retry_after: Duration::ZERO,
+        revalidate_after: Duration::ZERO,
+        traefik_ingress_routes: false,
+        static_services: Vec::new(),
+        config_map: None,
+        reference_url: ai.reference_url,
     }
 }
 
@@ -204,13 +229,7 @@ async fn draft(args: DraftArgs) -> anyhow::Result<()> {
         Arc::new(http::Client::new(Duration::from_secs(10))?);
     let llm: Arc<dyn widgets::Http> = Arc::new(http::Client::new(Duration::from_secs(300))?);
     let client = kube::Client::try_default().await?;
-    let settings = settings(
-        args.ai,
-        String::new(),
-        Duration::ZERO,
-        Duration::ZERO,
-        false,
-    );
+    let settings = settings(args.ai, String::new());
     let generated = generator::draft(
         client,
         llm,
@@ -220,6 +239,8 @@ async fn draft(args: DraftArgs) -> anyhow::Result<()> {
         name,
         args.url,
         args.hint,
+        args.kind,
+        args.name,
     )
     .await?;
     eprintln!(

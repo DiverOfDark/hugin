@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::model::{dom_id, KubeRef, SecretRef, Service, WidgetSpec};
+use crate::model::{dom_id, KubeRef, SecretRef, Service, Source, SourceKind, WidgetSpec};
 
 pub const LEGACY_PREFIX: &str = "gethomepage.dev/";
 pub const NATIVE_PREFIX: &str = "hugin.dev/";
@@ -104,6 +104,14 @@ pub fn service_from_annotations(
 
     Some(Service {
         id: dom_id(&format!("{kind}/{namespace}/{name}")),
+        source: Source {
+            kind: if kind == "ingressroute" {
+                SourceKind::IngressRoute
+            } else {
+                SourceKind::Ingress
+            },
+            name: name.to_string(),
+        },
         group: text("group").unwrap_or_else(|| DEFAULT_GROUP.to_string()),
         name: text("name").unwrap_or_else(|| name.to_string()),
         href: text("href").or(default_href),

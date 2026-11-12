@@ -25,8 +25,8 @@ use kube::{Api, Client};
 use serde_json::json;
 
 use crate::cluster::{ingress_service, ingressroute_service, pod_image, PodLite};
-use crate::crd::{self, split_image, widget_name_for_image, WidgetResource, GENERATED_LABEL};
-use crate::model::Service;
+use crate::crd::{self, split_image, WidgetResource, GENERATED_LABEL};
+use crate::model::{Service, WidgetSpec};
 use crate::secrets::SecretReader;
 use crate::widgets::{Http, LuaWidget, Request, Trace, WidgetConfig, WidgetData, API_REFERENCE};
 
@@ -46,12 +46,6 @@ const PROBE_PATHS: [&str; 11] = [
     "/api/v1",
     "/metrics",
 ];
-const EXAMPLES: [&str; 3] = [
-    include_str!("../widgets/paperlessngx.lua"),
-    include_str!("../widgets/traefik.lua"),
-    include_str!("../widgets/pihole.lua"),
-];
-
 #[derive(Debug, Clone)]
 pub struct Settings {
     /// Chat-completions endpoint of an OpenAI-compatible API.
@@ -65,7 +59,17 @@ pub struct Settings {
     pub max_rounds: u32,
     /// How long to leave a service alone after a failed generation.
     pub retry_after: Duration,
+    /// How often a stored script is run again to see that it still works.
+    pub revalidate_after: Duration,
     pub traefik_ingress_routes: bool,
+    /// Entries of `config.services`; their widgets are generated too.
+    pub static_services: Vec<Service>,
+    /// ConfigMap (in `namespace`) that owns the widgets of static services.
+    pub config_map: Option<String>,
+    /// Base URL of a raw checkout of gethomepage, whose widget sources are
+    /// shown to the model as the reference for a `widget.type`. Empty
+    /// disables it.
+    pub reference_url: String,
 }
 
 /// What the model is told about the service.
@@ -73,7 +77,10 @@ pub struct Settings {
 pub struct ServiceContext {
     pub name: String,
     pub description: Option<String>,
-    pub image: String,
+    /// `widget.type`: usually the name of the application or of the
+    /// gethomepage widget the owner had in mind.
+    pub widget_type: Option<String>,
+    pub image: Option<String>,
     pub tag: Option<String>,
     pub hint: Option<String>,
 }
@@ -93,8 +100,13 @@ HTTP API and returns them for the card.\n\n\
 Rules:\n\
 - Reply with exactly one ```lua code block and nothing else.\n\
 - Start the script with one comment line: `-- <App name>: <what the card shows>`.\n\
+- `widget.type` names the application, often as a gethomepage widget type. If you know what \
+that gethomepage widget shows, show the same things, with its labels.\n\
 - Return two to four blocks. Pick what the owner wants at a glance: counts, queue lengths, \
 health, usage. Labels are short (one or two words). Format numbers with `fmt`.\n\
+- Every block must be real information from the application's API. Never return filler such \
+as an HTTP status, \"Up\", a response size or a page title. If you cannot get real data, end \
+with `fail` and say what is missing.\n\
 - Use only endpoints you have evidence for: the probe results, the request traces, or an API you \
 know this application has. Prefer one or two cheap endpoints.\n\
 - Never hardcode a host; use paths under `widget.url`.\n\
@@ -107,13 +119,90 @@ with `fail(\"exploring\")`. You will get the request trace back.\n\
 # Script API\n\n",
     );
     prompt.push_str(API_REFERENCE);
-    prompt.push_str("\n# Examples\n");
-    for example in EXAMPLES {
-        prompt.push_str("\n```lua\n");
-        prompt.push_str(example.trim_end());
-        prompt.push_str("\n```\n");
-    }
     prompt
+}
+
+const REFERENCE_FILE_CHARS: usize = 14_000;
+
+async fn fetch_text(http: &dyn Http, url: String) -> Option<String> {
+    let response = http.send(Request::get(url)).await.ok()?;
+    (response.status == 200).then(|| String::from_utf8_lossy(&response.body).into_owned())
+}
+
+/// Directory of a gethomepage widget type, following aliases in its
+/// `widgets.js` (`jellyseerr: seerr` with `import seerr from "./seerr/widget"`).
+fn widget_directory(widgets_js: &str, kind: &str) -> Option<String> {
+    let mut identifier = None;
+    for line in widgets_js.lines() {
+        let line = line.trim().trim_end_matches(',');
+        if line == kind {
+            identifier = Some(kind.to_string());
+        } else if let Some((name, target)) = line.split_once(':') {
+            if name.trim() == kind {
+                identifier = Some(target.trim().to_string());
+            }
+        }
+    }
+    let identifier = identifier?;
+    widgets_js.lines().find_map(|line| {
+        let rest = line
+            .trim()
+            .strip_prefix(&format!("import {identifier} from \"./"))?;
+        Some(rest.split('/').next()?.to_string())
+    })
+}
+
+/// gethomepage's implementation of a widget type, for the model to port:
+/// the API definition, the component that picks fields and labels, a custom
+/// proxy if there is one, the shared handler that adds credentials, and
+/// the English labels. `None` when the type is unknown there.
+pub async fn reference(http: &dyn Http, base: &str, kind: &str) -> Option<String> {
+    let base = base.trim_end_matches('/');
+    if base.is_empty()
+        || !kind
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let widgets_js = fetch_text(http, format!("{base}/src/widgets/widgets.js")).await?;
+    let dir = widget_directory(&widgets_js, kind)?;
+    let widget_js = fetch_text(http, format!("{base}/src/widgets/{dir}/widget.js")).await?;
+
+    let mut out = String::new();
+    let mut add = |title: &str, text: &str| {
+        out.push_str(&format!(
+            "\n--- {title} ---\n{}\n",
+            preview_lines(text, REFERENCE_FILE_CHARS)
+        ));
+    };
+    add(&format!("src/widgets/{dir}/widget.js"), &widget_js);
+    for file in ["component.jsx", "proxy.js"] {
+        if let Some(text) = fetch_text(http, format!("{base}/src/widgets/{dir}/{file}")).await {
+            add(&format!("src/widgets/{dir}/{file}"), &text);
+        }
+    }
+    for (name, path) in [
+        (
+            "credentialedProxyHandler",
+            "src/utils/proxy/handlers/credentialed.js",
+        ),
+        ("genericProxyHandler", "src/utils/proxy/handlers/generic.js"),
+    ] {
+        if widget_js.contains(name) {
+            if let Some(text) = fetch_text(http, format!("{base}/{path}")).await {
+                add(path, &text);
+            }
+        }
+    }
+    if let Some(locales) = fetch_text(http, format!("{base}/public/locales/en/common.json")).await {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&locales) {
+            if let Some(labels) = json.get(&dir).or_else(|| json.get(kind)) {
+                add("English labels", &labels.to_string());
+            }
+        }
+    }
+    Some(out)
 }
 
 /// One line per operation of an OpenAPI document, or `None` if it is not one.
@@ -181,7 +270,12 @@ pub async fn probe(http: &dyn Http, base_url: &str) -> String {
     out
 }
 
-fn user_prompt(context: &ServiceContext, cfg: &WidgetConfig, probes: &str) -> String {
+fn user_prompt(
+    context: &ServiceContext,
+    cfg: &WidgetConfig,
+    probes: &str,
+    reference: Option<&str>,
+) -> String {
     let params: BTreeMap<&String, &String> = cfg
         .params
         .iter()
@@ -189,12 +283,13 @@ fn user_prompt(context: &ServiceContext, cfg: &WidgetConfig, probes: &str) -> St
         .collect();
     let secrets: Vec<&String> = cfg.secrets.keys().collect();
     format!(
-        "Service: {name}\nDescription: {description}\nImage: {image}{tag}\nwidget.url: {url}\n\
+        "Service: {name}\nDescription: {description}\nwidget.type: {kind}\nImage: {image}{tag}\nwidget.url: {url}\n\
 widget.params: {params}\nAvailable secret names: {secrets}\nOwner's hint: {hint}\n\n\
-Probe results (unauthenticated):\n{probes}",
+Probe results (unauthenticated):\n{probes}{reference}",
         name = context.name,
         description = context.description.as_deref().unwrap_or("-"),
-        image = context.image,
+        kind = context.widget_type.as_deref().unwrap_or("-"),
+        image = context.image.as_deref().unwrap_or("-"),
         tag = context
             .tag
             .as_ref()
@@ -204,6 +299,19 @@ Probe results (unauthenticated):\n{probes}",
         params = json!(params),
         secrets = json!(secrets),
         hint = context.hint.as_deref().unwrap_or("-"),
+        reference = match reference {
+            Some(source) => format!(
+                "\nReference: how the gethomepage dashboard implements widget type \"{}\" (JavaScript). \
+Port it: the same endpoints, the same way of sending credentials, the same default fields with \
+the same English labels and number formats. In its URL templates `{{url}}` is widget.url and \
+`{{key}}` is secret(\"key\"); `widget.username` and `widget.password` map to \
+secret(\"username\") or widget.params.username, and secret(\"password\"). Its `t(\"common.number\")` \
+is fmt.number, `common.bytes` fmt.bytes, `common.bbytes` fmt.bytes with binary = true, \
+`common.byterate` fmt.rate, `common.percent` fmt.percent, `common.duration` fmt.duration.\n{source}",
+                context.widget_type.as_deref().unwrap_or("-")
+            ),
+            None => String::new(),
+        },
     )
 }
 
@@ -321,9 +429,13 @@ pub async fn generate_script(
 ) -> Result<Generated, String> {
     let base = cfg.url().map_err(|e| e.0)?.to_string();
     let probes = probe(service_http.as_ref(), &base).await;
+    let source = match &context.widget_type {
+        Some(kind) => reference(service_http.as_ref(), &settings.reference_url, kind).await,
+        None => None,
+    };
     let mut messages = vec![
         json!({ "role": "system", "content": system_prompt() }),
-        json!({ "role": "user", "content": user_prompt(context, cfg, &probes) }),
+        json!({ "role": "user", "content": user_prompt(context, cfg, &probes, source.as_deref()) }),
     ];
     let mut last_problem = String::from("no attempt was made");
     for round in 1..=settings.max_rounds {
@@ -377,19 +489,39 @@ fn major(tag: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-/// Whether an existing Widget for the image should be (re)written.
-fn needs_generation(existing: Option<&WidgetResource>, tag: Option<&str>) -> bool {
-    let Some(widget) = existing else {
-        return true;
-    };
-    let generated = widget
+/// Hash of everything about a service that a script may depend on, so a
+/// changed annotation gets a new script.
+fn input_hash(service: &Service, spec: &WidgetSpec) -> String {
+    let mut text = format!("{}\n{}\n", service.name, spec.kind);
+    for (name, value) in &spec.params {
+        text.push_str(&format!("{name}={value}\n"));
+    }
+    for (name, reference) in &spec.secrets {
+        text.push_str(&format!("{name}<-{}/{}\n", reference.name, reference.key));
+    }
+    crate::model::dom_id(&text)[2..].to_string()
+}
+
+fn is_generated(widget: &WidgetResource) -> bool {
+    widget
         .metadata
         .labels
         .as_ref()
-        .is_some_and(|l| l.contains_key(GENERATED_LABEL));
-    if !generated {
-        // Written by a person: never touched.
-        return false;
+        .is_some_and(|l| l.contains_key(GENERATED_LABEL))
+}
+
+/// Why a generated Widget should be (re)written, or `None` to leave it.
+fn generation_reason(
+    existing: Option<&WidgetResource>,
+    hash: &str,
+    tag: Option<&str>,
+) -> Option<&'static str> {
+    let Some(widget) = existing else {
+        return Some("no widget yet");
+    };
+    if !is_generated(widget) {
+        // Written by a person under the generator's name: never touched.
+        return None;
     }
     let regenerate = widget
         .metadata
@@ -397,19 +529,21 @@ fn needs_generation(existing: Option<&WidgetResource>, tag: Option<&str>) -> boo
         .as_ref()
         .is_some_and(|a| a.contains_key(REGENERATE_ANNOTATION));
     if regenerate {
-        return true;
+        return Some("regeneration requested");
     }
     let status = widget.status.clone().unwrap_or_default();
     if status.phase.as_deref() != Some("Ready") {
-        // Failed earlier; the in-memory backoff decides when to retry.
-        return true;
+        return Some("previous generation failed");
+    }
+    if status.input_hash.as_deref() != Some(hash) {
+        return Some("widget annotations changed");
     }
     match (
         status.image_tag.as_deref().and_then(major),
         tag.and_then(major),
     ) {
-        (Some(was), Some(now)) => was != now,
-        _ => false,
+        (Some(was), Some(now)) if was != now => Some("image major version changed"),
+        _ => None,
     }
 }
 
@@ -440,16 +574,30 @@ fn now_rfc3339() -> String {
 
 struct Target {
     service: Service,
-    image: String,
+    /// Where the Widget is written: the service's namespace.
+    namespace: String,
+    widget_name: String,
+    /// The object the service was discovered from; it owns the Widget, so
+    /// the Widget shows up under it (in Argo CD, for instance) and is
+    /// deleted with it.
+    owner: Option<serde_json::Value>,
+    image: Option<String>,
     tag: Option<String>,
 }
 
+fn owner_reference(api_version: &str, kind: &str, name: &str, uid: &str) -> serde_json::Value {
+    json!({ "apiVersion": api_version, "kind": kind, "name": name, "uid": uid })
+}
+
 async fn discover(client: &Client, settings: &Settings) -> anyhow::Result<Vec<Target>> {
-    let mut services: Vec<Service> = Vec::new();
+    let mut found: Vec<(Service, Option<serde_json::Value>)> = Vec::new();
     let ingresses: Api<Ingress> = Api::all(client.clone());
     for ingress in ingresses.list(&ListParams::default()).await? {
         if let Some((_, Some(service))) = ingress_service(&ingress) {
-            services.push(service);
+            let owner = ingress.metadata.uid.as_deref().map(|uid| {
+                owner_reference("networking.k8s.io/v1", "Ingress", &service.source.name, uid)
+            });
+            found.push((service, owner));
         }
     }
     if settings.traefik_ingress_routes {
@@ -460,35 +608,67 @@ async fn discover(client: &Client, settings: &Settings) -> anyhow::Result<Vec<Ta
             Ok(list) => {
                 for route in list {
                     if let Some((_, Some(service))) = ingressroute_service(&route) {
-                        services.push(service);
+                        let owner = route.metadata.uid.as_deref().map(|uid| {
+                            owner_reference(
+                                "traefik.io/v1alpha1",
+                                "IngressRoute",
+                                &service.source.name,
+                                uid,
+                            )
+                        });
+                        found.push((service, owner));
                     }
                 }
             }
             Err(error) => tracing::warn!(%error, "cannot list IngressRoutes"),
         }
     }
+    if settings.static_services.iter().any(|s| s.widget.is_some()) {
+        let owner = match &settings.config_map {
+            Some(name) => {
+                let maps: Api<k8s_openapi::api::core::v1::ConfigMap> =
+                    Api::namespaced(client.clone(), &settings.namespace);
+                maps.get_opt(name)
+                    .await?
+                    .and_then(|map| map.metadata.uid)
+                    .map(|uid| owner_reference("v1", "ConfigMap", name, &uid))
+            }
+            None => None,
+        };
+        for service in &settings.static_services {
+            found.push((service.clone(), owner.clone()));
+        }
+    }
 
     let pod_resource = ApiResource::erase::<k8s_openapi::api::core::v1::Pod>(&());
     let mut targets = Vec::new();
-    for service in services {
-        let is_auto = service.widget.as_ref().is_some_and(|w| w.kind == "auto");
-        let Some(kube) = service.kube.clone().filter(|_| is_auto) else {
+    for (service, owner) in found {
+        if service.widget.is_none() {
             continue;
-        };
-        let pods: Api<PodLite> =
-            Api::namespaced_with(client.clone(), &kube.namespace, &pod_resource);
-        let list = pods
-            .list(&ListParams::default().labels(&kube.pod_selector))
-            .await?;
-        let mut pods: Vec<&PodLite> = list.items.iter().collect();
-        pods.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
-        let Some(image) = pods.iter().find_map(|p| pod_image(p)) else {
-            tracing::debug!(service = %service.name, "no pod yet, cannot identify the image");
-            continue;
-        };
-        let (image, tag) = split_image(&image);
+        }
+        let (mut image, mut tag) = (None, None);
+        if let Some(kube) = &service.kube {
+            let pods: Api<PodLite> =
+                Api::namespaced_with(client.clone(), &kube.namespace, &pod_resource);
+            let list = pods
+                .list(&ListParams::default().labels(&kube.pod_selector))
+                .await?;
+            let mut pods: Vec<&PodLite> = list.items.iter().collect();
+            pods.sort_by(|a, b| a.metadata.name.cmp(&b.metadata.name));
+            if let Some(found) = pods.iter().find_map(|p| pod_image(p)) {
+                let (repo, version) = split_image(&found);
+                image = Some(repo);
+                tag = version;
+            }
+        }
         targets.push(Target {
+            namespace: service
+                .kube
+                .as_ref()
+                .map_or_else(|| settings.namespace.clone(), |k| k.namespace.clone()),
+            widget_name: service.generated_widget_name(),
             service,
+            owner,
             image,
             tag,
         });
@@ -496,81 +676,108 @@ async fn discover(client: &Client, settings: &Settings) -> anyhow::Result<Vec<Ta
     Ok(targets)
 }
 
+fn context_of(target: &Target, spec: &WidgetSpec) -> ServiceContext {
+    ServiceContext {
+        name: target.service.name.clone(),
+        description: target.service.description.clone(),
+        widget_type: Some(spec.kind.clone()).filter(|k| k != "auto"),
+        image: target.image.clone(),
+        tag: target.tag.clone(),
+        hint: spec.params.get("hint").cloned(),
+    }
+}
+
 async fn store(
     client: &Client,
     settings: &Settings,
     target: &Target,
+    hash: &str,
     outcome: &Result<Generated, String>,
 ) -> anyhow::Result<()> {
     let api: Api<WidgetResource> =
-        Api::namespaced_with(client.clone(), &settings.namespace, &crd::api_resource());
-    let name = widget_name_for_image(&target.image);
-    let mut spec = json!({ "image": target.image });
-    if outcome.is_err() {
-        // A failed regeneration must not take away a script that works:
-        // re-apply the stored one and only record the failure.
-        let current = api.get_opt(&name).await?;
-        if let Some(script) = current.and_then(|w| w.spec.script) {
-            spec["script"] = json!(script);
-            if let Some(description) = script.lines().next().and_then(|l| l.strip_prefix("--")) {
-                spec["description"] = json!(description.trim());
+        Api::namespaced_with(client.clone(), &target.namespace, &crd::api_resource());
+    let name = &target.widget_name;
+    let description_of = |script: &str| {
+        script
+            .lines()
+            .next()
+            .and_then(|l| l.strip_prefix("--"))
+            .map(|d| d.trim().to_string())
+    };
+    let mut spec = json!({});
+    match outcome {
+        Ok(generated) => {
+            spec["script"] = json!(generated.script);
+            if let Some(description) = description_of(&generated.script) {
+                spec["description"] = json!(description);
+            }
+        }
+        Err(_) => {
+            // A failed regeneration must not take away a script that works:
+            // re-apply the stored one and only record the failure.
+            let current = api.get_opt(name).await?;
+            if let Some(script) = current.and_then(|w| w.spec.script) {
+                if let Some(description) = description_of(&script) {
+                    spec["description"] = json!(description);
+                }
+                spec["script"] = json!(script);
             }
         }
     }
-    if let Ok(generated) = outcome {
-        spec["script"] = json!(generated.script);
-        let first = generated.script.lines().next().unwrap_or("");
-        if let Some(description) = first.strip_prefix("--") {
-            spec["description"] = json!(description.trim());
-        }
+    let mut metadata = json!({
+        "name": name,
+        "namespace": target.namespace,
+        "labels": { GENERATED_LABEL: "true" },
+    });
+    if let Some(owner) = &target.owner {
+        metadata["ownerReferences"] = json!([owner]);
     }
     let manifest = json!({
         "apiVersion": format!("{}/{}", crd::GROUP, crd::VERSION),
         "kind": crd::KIND,
-        "metadata": {
-            "name": name,
-            "namespace": settings.namespace,
-            "labels": { GENERATED_LABEL: "true" },
-            // Applying without the annotation clears a regenerate request.
-        },
+        "metadata": metadata,
         "spec": spec,
     });
     api.patch(
-        &name,
+        name,
         &PatchParams::apply(FIELD_MANAGER).force(),
         &Patch::Apply(&manifest),
     )
     .await?;
-    // The annotation is set by a person with another field manager, so the
-    // apply above does not remove it.
+    // A regenerate request is set by a person with another field manager,
+    // so the apply above does not remove it.
     let clear = json!({ "metadata": { "annotations": { REGENERATE_ANNOTATION: null } } });
-    api.patch(&name, &PatchParams::default(), &Patch::Merge(&clear))
+    api.patch(name, &PatchParams::default(), &Patch::Merge(&clear))
         .await?;
 
-    let status = match outcome {
-        Ok(generated) => json!({
-            "phase": "Ready",
-            "message": format!(
-                "validated against {}: {}",
-                target.service.name,
-                generated.blocks.iter().map(|(l, v)| format!("{l}={v}")).collect::<Vec<_>>().join(", ")
+    let (phase, message, attempts) = match outcome {
+        Ok(generated) => (
+            "Ready",
+            format!(
+                "validated: {}",
+                generated
+                    .blocks
+                    .iter()
+                    .map(|(l, v)| format!("{l}={v}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
-            "model": settings.model,
-            "generatedAt": now_rfc3339(),
-            "imageTag": target.tag,
-            "attempts": generated.rounds,
-        }),
-        Err(reason) => json!({
-            "phase": "Failed",
-            "message": reason,
-            "model": settings.model,
-            "generatedAt": now_rfc3339(),
-            "imageTag": target.tag,
-            "attempts": settings.max_rounds,
-        }),
+            generated.rounds,
+        ),
+        Err(reason) => ("Failed", reason.clone(), settings.max_rounds),
     };
+    let status = json!({
+        "phase": phase,
+        "message": message,
+        "model": settings.model,
+        "generatedAt": now_rfc3339(),
+        "image": target.image,
+        "imageTag": target.tag,
+        "inputHash": hash,
+        "attempts": attempts,
+    });
     api.patch_status(
-        &name,
+        name,
         &PatchParams::default(),
         &Patch::Merge(&json!({ "status": status })),
     )
@@ -589,31 +796,23 @@ pub async fn draft(
     name: &str,
     url: Option<String>,
     hint: Option<String>,
+    kind: Option<String>,
+    display_name: Option<String>,
 ) -> anyhow::Result<Generated> {
     let ingresses: Api<Ingress> = Api::namespaced(client.clone(), namespace);
     let ingress = ingresses.get(name).await?;
-    let service = ingress_service(&ingress)
+    let mut service = ingress_service(&ingress)
         .and_then(|(_, service)| service)
         .ok_or_else(|| anyhow::anyhow!("{namespace}/{name} is not enabled for the dashboard"))?;
-    let kube = service
-        .kube
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("service has no namespace"))?;
-
-    let pod_resource = ApiResource::erase::<k8s_openapi::api::core::v1::Pod>(&());
-    let pods: Api<PodLite> = Api::namespaced_with(client.clone(), &kube.namespace, &pod_resource);
-    let list = pods
-        .list(&ListParams::default().labels(&kube.pod_selector))
-        .await?;
-    let image = list
-        .items
-        .iter()
-        .find_map(pod_image)
-        .ok_or_else(|| anyhow::anyhow!("no pod matches {}", kube.pod_selector))?;
-    let (image, tag) = split_image(&image);
+    if let Some(display_name) = display_name {
+        // Standing in for a service that is not behind this Ingress.
+        service.name = display_name;
+        service.description = None;
+        service.kube = None;
+    }
 
     // Works for an Ingress without any widget annotations too.
-    let mut spec = service.widget.clone().unwrap_or(crate::model::WidgetSpec {
+    let mut spec = service.widget.clone().unwrap_or(WidgetSpec {
         kind: "auto".into(),
         params: BTreeMap::new(),
         secrets: BTreeMap::new(),
@@ -625,20 +824,55 @@ pub async fn draft(
     }) {
         spec.params.insert("url".into(), url);
     }
+    if let Some(hint) = hint {
+        spec.params.insert("hint".into(), hint);
+    }
+    if let Some(kind) = kind {
+        spec.kind = kind;
+    }
+
+    let pod_resource = ApiResource::erase::<k8s_openapi::api::core::v1::Pod>(&());
+    let (mut image, mut tag) = (None, None);
+    if let Some(kube) = &service.kube {
+        let pods: Api<PodLite> =
+            Api::namespaced_with(client.clone(), &kube.namespace, &pod_resource);
+        let list = pods
+            .list(&ListParams::default().labels(&kube.pod_selector))
+            .await?;
+        if let Some(found) = list.items.iter().find_map(pod_image) {
+            let (repo, version) = split_image(&found);
+            image = Some(repo);
+            tag = version;
+        }
+    }
+    let target = Target {
+        namespace: namespace.to_string(),
+        widget_name: service.generated_widget_name(),
+        service,
+        owner: None,
+        image,
+        tag,
+    };
     let secrets = SecretReader::new(Some(client));
     let (cfg, _) = crate::poller::resolve(&spec, &secrets)
         .await
         .map_err(|reason| anyhow::anyhow!(reason))?;
-    let context = ServiceContext {
-        name: service.name.clone(),
-        description: service.description.clone(),
-        image,
-        tag,
-        hint: hint.or_else(|| spec.params.get("hint").cloned()),
-    };
+    let context = context_of(&target, &spec);
     generate_script(llm.as_ref(), service_http, settings, &context, &cfg)
         .await
         .map_err(|reason| anyhow::anyhow!(reason))
+}
+
+/// What the controller remembers between cycles. Lost on restart, which
+/// only means an early retry or re-check.
+#[derive(Default)]
+struct Memory {
+    /// When a failed generation may be tried again.
+    retry_at: HashMap<(String, String), Instant>,
+    /// When a stored script is due to be run again.
+    check_at: HashMap<(String, String), Instant>,
+    /// Consecutive failed re-checks.
+    strikes: HashMap<(String, String), u32>,
 }
 
 /// The controller loop.
@@ -649,103 +883,175 @@ pub async fn run(
     settings: Settings,
 ) -> anyhow::Result<()> {
     let secrets = SecretReader::new(Some(client.clone()));
-    let widgets: Api<WidgetResource> = Api::all_with(client.clone(), &crd::api_resource());
-    let mut failed_at: HashMap<String, Instant> = HashMap::new();
+    let mut memory = Memory::default();
     tracing::info!(model = %settings.model, namespace = %settings.namespace, "generator running");
     loop {
-        match cycle(
+        if let Err(error) = cycle(
             &client,
-            &widgets,
             &secrets,
             &llm,
             &service_http,
             &settings,
-            &mut failed_at,
+            &mut memory,
         )
         .await
         {
-            Ok(()) => {}
-            Err(error) => tracing::warn!(%error, "generator cycle failed"),
+            tracing::warn!(%error, "generator cycle failed");
         }
         tokio::time::sleep(settings.interval).await;
     }
 }
 
+/// Runs a stored script once. `Some(problem)` when it no longer produces a
+/// card, `None` when it is fine or the failure is on the network path.
+async fn recheck(
+    widget: &WidgetResource,
+    service_http: &Arc<dyn Http>,
+    cfg: &WidgetConfig,
+) -> Option<String> {
+    let script = widget.spec.script.as_deref()?;
+    let (result, _) = LuaWidget::new("recheck", script)
+        .run(service_http.clone(), cfg)
+        .await;
+    match result {
+        Ok(data) => acceptable(&data).err(),
+        Err(error)
+            if matches!(
+                error.0.as_str(),
+                "timeout" | "connection failed" | "request failed"
+            ) =>
+        {
+            None
+        }
+        Err(error) => Some(error.0),
+    }
+}
+
 async fn cycle(
     client: &Client,
-    widgets: &Api<WidgetResource>,
     secrets: &SecretReader,
     llm: &Arc<dyn Http>,
     service_http: &Arc<dyn Http>,
     settings: &Settings,
-    failed_at: &mut HashMap<String, Instant>,
+    memory: &mut Memory,
 ) -> anyhow::Result<()> {
     let targets = discover(client, settings).await?;
-    if targets.is_empty() {
-        return Ok(());
-    }
+    let widgets: Api<WidgetResource> = Api::all_with(client.clone(), &crd::api_resource());
     let existing = widgets.list(&ListParams::default()).await?.items;
-    let mut done: Vec<String> = Vec::new();
-    for target in targets {
-        // One widget per image, however many services run it.
-        if done.contains(&target.image) {
-            continue;
-        }
-        done.push(target.image.clone());
+    let find = |namespace: &str, name: &str| {
+        existing.iter().find(|w| {
+            w.metadata.namespace.as_deref() == Some(namespace)
+                && w.metadata.name.as_deref() == Some(name)
+        })
+    };
+    let hand_written = |namespace: &str, name: &str| {
+        find(namespace, name).is_some_and(|w| !is_generated(w) && w.spec.script.is_some())
+    };
 
-        let for_image: Vec<&WidgetResource> = existing
-            .iter()
-            .filter(|w| w.spec.image.as_deref() == Some(target.image.as_str()))
-            .collect();
-        let manual = for_image.iter().any(|w| {
-            !w.metadata
-                .labels
-                .as_ref()
-                .is_some_and(|l| l.contains_key(GENERATED_LABEL))
-        });
-        let own = for_image
-            .iter()
-            .find(|w| w.metadata.namespace.as_deref() == Some(settings.namespace.as_str()))
-            .copied();
-        if manual || !needs_generation(own, target.tag.as_deref()) {
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for target in &targets {
+        let Some(spec) = &target.service.widget else {
+            continue;
+        };
+        // A hand-written Widget named like the widget.type is what the
+        // dashboard uses; nothing to generate.
+        if hand_written(&target.namespace, &spec.kind)
+            || hand_written(&settings.namespace, &spec.kind)
+        {
             continue;
         }
-        if failed_at
-            .get(&target.image)
-            .is_some_and(|at| at.elapsed() < settings.retry_after)
+        let key = (target.namespace.clone(), target.widget_name.clone());
+        wanted.push(key.clone());
+        let current = find(&key.0, &key.1);
+        let hash = input_hash(&target.service, spec);
+        let mut reason = generation_reason(current, &hash, target.tag.as_deref());
+
+        let resolved = crate::poller::resolve(spec, secrets).await;
+        if let (None, Some(widget), Ok((cfg, _))) = (reason, current, &resolved) {
+            let due = memory
+                .check_at
+                .get(&key)
+                .is_none_or(|at| *at <= Instant::now());
+            if is_generated(widget) && due {
+                match recheck(widget, service_http, cfg).await {
+                    None => {
+                        memory.strikes.remove(&key);
+                        memory
+                            .check_at
+                            .insert(key.clone(), Instant::now() + settings.revalidate_after);
+                    }
+                    Some(problem) => {
+                        let strikes = memory.strikes.entry(key.clone()).or_insert(0);
+                        *strikes += 1;
+                        tracing::info!(service = %target.service.name, problem, strikes = *strikes, "stored script failed its re-check");
+                        // Twice in a row, ten minutes apart, before replacing it.
+                        memory
+                            .check_at
+                            .insert(key.clone(), Instant::now() + Duration::from_secs(600));
+                        if *strikes >= 2 {
+                            memory.strikes.remove(&key);
+                            reason = Some("stored script stopped working");
+                        }
+                    }
+                }
+            }
+        }
+        let Some(reason) = reason else {
+            continue;
+        };
+        if memory
+            .retry_at
+            .get(&key)
+            .is_some_and(|at| *at > Instant::now())
         {
             continue;
         }
 
-        let Some(spec) = &target.service.widget else {
-            continue;
-        };
-        let context = ServiceContext {
-            name: target.service.name.clone(),
-            description: target.service.description.clone(),
-            image: target.image.clone(),
-            tag: target.tag.clone(),
-            hint: spec.params.get("hint").cloned(),
-        };
-        tracing::info!(service = %context.name, image = %context.image, "generating widget");
-        let outcome = match crate::poller::resolve(spec, secrets).await {
+        tracing::info!(service = %target.service.name, namespace = %key.0, widget = %key.1, reason, "generating widget");
+        let outcome = match resolved {
             Ok((cfg, _)) => {
+                let context = context_of(target, spec);
                 generate_script(llm.as_ref(), service_http.clone(), settings, &context, &cfg).await
             }
             Err(reason) => Err(reason),
         };
         match &outcome {
             Ok(generated) => {
-                failed_at.remove(&target.image);
-                tracing::info!(service = %context.name, rounds = generated.rounds, blocks = ?generated.blocks, "widget generated");
+                memory.retry_at.remove(&key);
+                memory
+                    .check_at
+                    .insert(key.clone(), Instant::now() + settings.revalidate_after);
+                tracing::info!(service = %target.service.name, rounds = generated.rounds, blocks = ?generated.blocks, "widget generated");
             }
             Err(reason) => {
-                failed_at.insert(target.image.clone(), Instant::now());
-                tracing::warn!(service = %context.name, reason, "widget generation failed");
+                memory
+                    .retry_at
+                    .insert(key.clone(), Instant::now() + settings.retry_after);
+                tracing::warn!(service = %target.service.name, reason, "widget generation failed");
             }
         }
-        if let Err(error) = store(client, settings, &target, &outcome).await {
-            tracing::warn!(%error, image = %target.image, "cannot store widget");
+        if let Err(error) = store(client, settings, target, &hash, &outcome).await {
+            tracing::warn!(%error, widget = %key.1, "cannot store widget");
+        }
+    }
+
+    // Generated widgets nobody asks for any more: the annotation was
+    // removed, or the naming changed. (A deleted Ingress takes its widget
+    // with it through the owner reference.)
+    for widget in existing.iter().filter(|w| is_generated(w)) {
+        let (Some(namespace), Some(name)) = (&widget.metadata.namespace, &widget.metadata.name)
+        else {
+            continue;
+        };
+        if !wanted.contains(&(namespace.clone(), name.clone())) {
+            let api: Api<WidgetResource> =
+                Api::namespaced_with(client.clone(), namespace, &crd::api_resource());
+            match api.delete(name, &Default::default()).await {
+                Ok(_) => {
+                    tracing::info!(%namespace, widget = %name, "removed unused generated widget")
+                }
+                Err(error) => tracing::warn!(%error, widget = %name, "cannot remove widget"),
+            }
         }
     }
     Ok(())
@@ -771,7 +1077,11 @@ mod tests {
             interval: Duration::from_secs(60),
             max_rounds: 3,
             retry_after: Duration::from_secs(3600),
+            revalidate_after: Duration::from_secs(3600),
             traefik_ingress_routes: false,
+            static_services: Vec::new(),
+            config_map: None,
+            reference_url: "https://raw.example/homepage".into(),
         }
     }
 
@@ -821,7 +1131,8 @@ mod tests {
         ServiceContext {
             name: "Trackhound".into(),
             description: Some("Parcel tracker".into()),
-            image: "ghcr.io/example/trackhound".into(),
+            widget_type: Some("trackhound".into()),
+            image: Some("ghcr.io/example/trackhound".into()),
             tag: Some("1.4.0".into()),
             hint: Some("show parcels in transit".into()),
         }
@@ -874,12 +1185,10 @@ mod tests {
             system.contains("secret(name)"),
             "API reference is in the prompt"
         );
-        assert!(
-            system.contains("Paperless-ngx"),
-            "examples are in the prompt"
-        );
+        assert!(system.contains("## Examples"), "examples are in the prompt");
         let user = first[1]["content"].as_str().unwrap();
         assert!(user.contains("Image: ghcr.io/example/trackhound:1.4.0"));
+        assert!(user.contains("widget.type: trackhound"));
         assert!(user.contains(r#"Available secret names: ["key"]"#));
         assert!(user.contains("GET /api/stats  Counts by status"), "{user}");
         assert!(!user.contains("DELETE"));
@@ -969,11 +1278,15 @@ mod tests {
 
     #[test]
     fn regeneration_rules() {
-        let widget = |generated: bool, phase: Option<&str>, tag: Option<&str>, regenerate: bool| {
+        let widget = |generated: bool,
+                      phase: Option<&str>,
+                      tag: Option<&str>,
+                      hash: &str,
+                      regenerate: bool| {
             let mut value = json!({
-                "metadata": { "name": "w", "namespace": "hugin", "labels": {}, "annotations": {} },
-                "spec": { "image": "x", "script": "return {}" },
-                "status": { "phase": phase, "imageTag": tag },
+                "metadata": { "name": "w", "namespace": "media", "labels": {}, "annotations": {} },
+                "spec": { "script": "return {}" },
+                "status": { "phase": phase, "imageTag": tag, "inputHash": hash },
             });
             if generated {
                 value["metadata"]["labels"][GENERATED_LABEL] = json!("true");
@@ -983,33 +1296,175 @@ mod tests {
             }
             serde_json::from_value::<WidgetResource>(value).unwrap()
         };
-        assert!(needs_generation(None, Some("1.0")));
+        assert_eq!(
+            generation_reason(None, "h", Some("1.0")),
+            Some("no widget yet")
+        );
         // A person's widget is never replaced.
-        assert!(!needs_generation(
-            Some(&widget(false, None, None, true)),
-            Some("9.0")
-        ));
-        assert!(!needs_generation(
-            Some(&widget(true, Some("Ready"), Some("5.2.1"), false)),
-            Some("v5.9")
-        ));
-        assert!(needs_generation(
-            Some(&widget(true, Some("Ready"), Some("5.2.1"), false)),
-            Some("6.0.0")
-        ));
-        assert!(needs_generation(
-            Some(&widget(true, Some("Failed"), Some("5.2.1"), false)),
-            Some("5.2.1")
-        ));
-        assert!(needs_generation(
-            Some(&widget(true, Some("Ready"), Some("5.2.1"), true)),
-            Some("5.2.1")
-        ));
+        assert_eq!(
+            generation_reason(
+                Some(&widget(false, None, None, "x", true)),
+                "h",
+                Some("9.0")
+            ),
+            None
+        );
+        let ready = widget(true, Some("Ready"), Some("5.2.1"), "h", false);
+        assert_eq!(generation_reason(Some(&ready), "h", Some("v5.9")), None);
+        assert_eq!(
+            generation_reason(Some(&ready), "h", Some("6.0.0")),
+            Some("image major version changed")
+        );
+        assert_eq!(
+            generation_reason(Some(&ready), "other", Some("5.2.1")),
+            Some("widget annotations changed")
+        );
+        assert_eq!(
+            generation_reason(
+                Some(&widget(true, Some("Failed"), Some("5.2.1"), "h", false)),
+                "h",
+                Some("5.2.1")
+            ),
+            Some("previous generation failed")
+        );
+        assert_eq!(
+            generation_reason(
+                Some(&widget(true, Some("Ready"), Some("5.2.1"), "h", true)),
+                "h",
+                Some("5.2.1")
+            ),
+            Some("regeneration requested")
+        );
         // Tags without a version (latest, digests) never trigger on their own.
-        assert!(!needs_generation(
-            Some(&widget(true, Some("Ready"), Some("latest"), false)),
-            Some("master")
-        ));
+        assert_eq!(
+            generation_reason(
+                Some(&widget(true, Some("Ready"), Some("latest"), "h", false)),
+                "h",
+                Some("master")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn input_hash_follows_the_annotations_but_not_secret_values() {
+        use crate::discovery::service_from_annotations;
+        let service = |extra: &[(&str, &str)]| {
+            let mut ann: BTreeMap<String, String> = [
+                ("gethomepage.dev/enabled", "true"),
+                ("gethomepage.dev/widget.type", "radarr"),
+                ("gethomepage.dev/widget.url", "http://radarr"),
+                (
+                    "hugin.dev/widget.key-from-secret",
+                    "plex-secret/RADARR_API_KEY",
+                ),
+            ]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+            for (k, v) in extra {
+                ann.insert(k.to_string(), v.to_string());
+            }
+            service_from_annotations("ingress", "media", "radarr", &ann, None).unwrap()
+        };
+        let hash = |s: &Service| input_hash(s, s.widget.as_ref().unwrap());
+        let base = service(&[]);
+        assert_eq!(hash(&base), hash(&service(&[])));
+        assert_ne!(
+            hash(&base),
+            hash(&service(&[(
+                "gethomepage.dev/widget.hint",
+                "show the queue"
+            )]))
+        );
+        assert_ne!(
+            hash(&base),
+            hash(&service(&[(
+                "gethomepage.dev/widget.url",
+                "http://radarr:7878"
+            )]))
+        );
+        // Unrelated annotations do not matter.
+        assert_eq!(
+            hash(&base),
+            hash(&service(&[("gethomepage.dev/icon", "radarr.png")]))
+        );
+    }
+
+    const WIDGETS_JS: &str = "import seerr from \"./seerr/widget\";\nimport traefik from \"./traefik/widget\";\n\nconst widgets = {\n  jellyseerr: seerr,\n  seerr,\n  traefik,\n};\n";
+
+    #[test]
+    fn widget_directories_follow_aliases() {
+        assert_eq!(
+            widget_directory(WIDGETS_JS, "traefik").as_deref(),
+            Some("traefik")
+        );
+        assert_eq!(
+            widget_directory(WIDGETS_JS, "jellyseerr").as_deref(),
+            Some("seerr")
+        );
+        assert_eq!(
+            widget_directory(WIDGETS_JS, "seerr").as_deref(),
+            Some("seerr")
+        );
+        assert_eq!(widget_directory(WIDGETS_JS, "trackhound"), None);
+    }
+
+    #[tokio::test]
+    async fn reference_collects_the_widget_sources_and_labels() {
+        let http = FakeHttp::new()
+            .on(Method::Get, "/src/widgets/widgets.js", 200, WIDGETS_JS)
+            .on(
+                Method::Get,
+                "/src/widgets/seerr/widget.js",
+                200,
+                "api: \"{url}/api/v1/{endpoint}\", proxyHandler: credentialedProxyHandler",
+            )
+            .on(
+                Method::Get,
+                "/src/widgets/seerr/component.jsx",
+                200,
+                "<Block label=\"seerr.pending\" />",
+            )
+            .on(Method::Get, "/src/widgets/seerr/proxy.js", 404, "")
+            .on(
+                Method::Get,
+                "/src/utils/proxy/handlers/credentialed.js",
+                200,
+                "headers[\"X-API-Key\"] = widget.key",
+            )
+            .on(
+                Method::Get,
+                "/public/locales/en/common.json",
+                200,
+                r#"{"seerr":{"pending":"Pending"},"other":{}}"#,
+            );
+        let text = reference(&http, "https://raw.example/homepage/", "jellyseerr")
+            .await
+            .unwrap();
+        assert!(text.contains("--- src/widgets/seerr/widget.js ---"));
+        assert!(text.contains("seerr.pending"));
+        assert!(text.contains("X-API-Key"));
+        assert!(text.contains(r#"{"pending":"Pending"}"#));
+        assert!(!text.contains("proxy.js"));
+        // Unknown types, a disabled reference and odd names give nothing.
+        assert!(
+            reference(&http, "https://raw.example/homepage", "trackhound")
+                .await
+                .is_none()
+        );
+        assert!(reference(&http, "", "seerr").await.is_none());
+        assert!(reference(&http, "https://raw.example/homepage", "../x")
+            .await
+            .is_none());
+    }
+
+    #[test]
+    fn owner_reference_shape() {
+        assert_eq!(
+            owner_reference("networking.k8s.io/v1", "Ingress", "radarr", "abc"),
+            json!({ "apiVersion": "networking.k8s.io/v1", "kind": "Ingress", "name": "radarr", "uid": "abc" })
+        );
     }
 
     #[test]

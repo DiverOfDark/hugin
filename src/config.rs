@@ -285,6 +285,10 @@ impl Config {
                 });
                 Service {
                     id: crate::model::dom_id(&format!("static/{}/{}", s.group, s.name)),
+                    source: crate::model::Source {
+                        kind: crate::model::SourceKind::Static,
+                        name: s.name.clone(),
+                    },
                     group: s.group.clone(),
                     name: s.name.clone(),
                     href: s.href.clone(),

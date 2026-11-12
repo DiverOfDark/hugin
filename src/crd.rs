@@ -1,10 +1,9 @@
 //! The `Widget` custom resource (`widgets.hugin.dev`): a Lua widget script
 //! stored in the cluster.
 //!
-//! A service selects one with `widget.type: <name>`; hugin looks in the
-//! service's own namespace first, then in hugin's namespace, then at the
-//! bundled scripts. `widget.type: auto` selects by the image the service's
-//! pods run (`spec.image`), which is how generated widgets are found.
+//! The generator writes one per service, named after the Ingress and owned
+//! by it. A hand-written `Widget` named like the service's `widget.type`,
+//! in the service's namespace or in hugin's, takes precedence.
 
 use kube::api::{ApiResource, GroupVersionKind};
 use kube::core::Object;
@@ -24,18 +23,15 @@ pub struct WidgetSpec {
     /// The Lua script. See docs/widget-api.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
-    /// Image repository (no tag) this widget is for, used by
-    /// `widget.type: auto`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
+/// Written by the generator on widgets it created.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct WidgetStatus {
-    /// Ready or Failed (generated widgets only).
+    /// Ready or Failed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -44,9 +40,14 @@ pub struct WidgetStatus {
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub generated_at: Option<String>,
-    /// Image tag the script was generated and validated against.
+    /// Image the service ran when the script was validated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_tag: Option<String>,
+    /// Hash of the widget annotations the script was written for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attempts: Option<u32>,
 }
@@ -70,26 +71,6 @@ pub fn split_image(image: &str) -> (String, Option<String>) {
     }
 }
 
-/// A DNS-label-safe object name for an image repository.
-pub fn widget_name_for_image(repo: &str) -> String {
-    let mut name = String::new();
-    for c in repo.chars() {
-        if c.is_ascii_alphanumeric() {
-            name.push(c.to_ascii_lowercase());
-        } else if !name.ends_with('-') {
-            name.push('-');
-        }
-    }
-    let name = name.trim_matches('-');
-    // Keep the end, which is the distinctive part of an image path.
-    let tail = if name.len() > 58 {
-        &name[name.len() - 58..]
-    } else {
-        name
-    };
-    format!("auto-{}", tail.trim_matches('-'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,17 +90,6 @@ mod tests {
             ("registry:5000/app".into(), Some("v2".into()))
         );
         assert_eq!(split_image("nginx"), ("nginx".into(), None));
-    }
-
-    #[test]
-    fn widget_names_are_valid_object_names() {
-        assert_eq!(
-            widget_name_for_image("ghcr.io/linuxserver/radarr"),
-            "auto-ghcr-io-linuxserver-radarr"
-        );
-        let long = widget_name_for_image(&format!("registry.example.com/{}/app", "x".repeat(80)));
-        assert!(long.len() <= 63, "{long}");
-        assert!(long.ends_with("-app"));
     }
 
     #[test]

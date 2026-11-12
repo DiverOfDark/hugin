@@ -117,12 +117,6 @@ async fn refresh_widget(
             }
             return (source, false);
         }
-        Resolved::Missing(reason) => {
-            if record_result(state, &service.id, Err(reason)) {
-                state.dirty.notify_one();
-            }
-            return (source, false);
-        }
     };
     let result = match resolve(spec, secrets).await {
         Err(reason) => Err(reason),
@@ -471,6 +465,10 @@ mod tests {
         let state = AppState::new(crate::config::Config::default());
         let service = Service {
             id: "s".into(),
+            source: crate::model::Source {
+                kind: crate::model::SourceKind::Static,
+                name: "Traefik".into(),
+            },
             group: "g".into(),
             name: "Traefik".into(),
             href: None,

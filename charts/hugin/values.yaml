@@ -62,9 +62,9 @@ secretAccess: []
 crds:
   install: true
 
-# The generator writes a Widget for every service annotated
-# `gethomepage.dev/widget.type: auto`: it asks a language model for a Lua
-# script, runs it against the service, and stores it once it works.
+# The generator writes a Widget for every service that has a `widget.type`:
+# it asks a language model for a Lua script, runs it against the service, and
+# stores it once it works, next to the service's Ingress and owned by it.
 # It is a separate Deployment; the dashboard itself never talks to the model.
 generator:
   enabled: false
@@ -77,12 +77,19 @@ generator:
   apiKeySecret:
     name: ""
     key: ""
+  # Raw base URL of the gethomepage sources. When a service's widget.type is
+  # a gethomepage widget type, its implementation there is given to the model
+  # as the reference to port. Set to "" to disable.
+  referenceUrl: https://raw.githubusercontent.com/gethomepage/homepage/main
   # Seconds between scans for services without a widget.
   intervalSeconds: 60
   # Attempts the model gets per service.
   rounds: 6
   # Hours before a failed service is tried again.
   retryHours: 6
+  # Hours between runs of a stored script to check it still works. A script
+  # that fails twice in a row is generated again.
+  revalidateHours: 12
   logLevel: "hugin=info,warn"
   podAnnotations: {}
   resources: {}

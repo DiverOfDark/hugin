@@ -28,10 +28,27 @@ pub struct KubeRef {
     pub pod_selector: String,
 }
 
+/// What a service was discovered from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Ingress,
+    IngressRoute,
+    /// An entry of `config.services`.
+    Static,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub kind: SourceKind,
+    /// Object name, or the service name for a static entry.
+    pub name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Service {
     /// Stable, DOM-safe identifier.
     pub id: String,
+    pub source: Source,
     pub group: String,
     pub name: String,
     pub href: Option<String>,
@@ -40,6 +57,34 @@ pub struct Service {
     pub weight: i64,
     pub kube: Option<KubeRef>,
     pub widget: Option<WidgetSpec>,
+}
+
+impl Service {
+    /// Name of the `Widget` the generator writes for this service. It lives
+    /// in the service's namespace (hugin's own for static entries).
+    pub fn generated_widget_name(&self) -> String {
+        let prefix = match self.source.kind {
+            SourceKind::Ingress => "auto-",
+            SourceKind::IngressRoute => "auto-route-",
+            SourceKind::Static => "auto-static-",
+        };
+        let mut slug = String::new();
+        for c in self.source.name.chars() {
+            if c.is_ascii_alphanumeric() {
+                slug.push(c.to_ascii_lowercase());
+            } else if !slug.ends_with('-') {
+                slug.push('-');
+            }
+        }
+        let slug = slug.trim_matches('-');
+        let room = 63 - prefix.len();
+        let slug = if slug.len() > room {
+            &slug[..room]
+        } else {
+            slug
+        };
+        format!("{prefix}{}", slug.trim_matches('-'))
+    }
 }
 
 /// Pod health as gethomepage reports it: based on pod phase only.
@@ -147,6 +192,39 @@ mod tests {
         assert!(!s.matches(&labels(&[("tier", "web"), ("env", "dev")])));
         assert!(!s.matches(&labels(&[("tier", "web"), ("legacy", "1")])));
         assert!(!s.matches(&labels(&[("env", "prod")])));
+    }
+
+    #[test]
+    fn generated_widget_names_are_valid_and_distinct_per_source() {
+        let service = |kind, name: &str| Service {
+            id: "x".into(),
+            source: Source {
+                kind,
+                name: name.into(),
+            },
+            group: "g".into(),
+            name: "n".into(),
+            href: None,
+            icon: None,
+            description: None,
+            weight: 0,
+            kube: None,
+            widget: None,
+        };
+        assert_eq!(
+            service(SourceKind::Ingress, "radarr").generated_widget_name(),
+            "auto-radarr"
+        );
+        assert_eq!(
+            service(SourceKind::IngressRoute, "ceph-dashboard").generated_widget_name(),
+            "auto-route-ceph-dashboard"
+        );
+        assert_eq!(
+            service(SourceKind::Static, "Pi hole (DNS)").generated_widget_name(),
+            "auto-static-pi-hole-dns"
+        );
+        let long = service(SourceKind::Ingress, &"a".repeat(80)).generated_widget_name();
+        assert_eq!(long.len(), 63);
     }
 
     #[test]

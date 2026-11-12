@@ -20,8 +20,6 @@ pub struct PodInfo {
     pub phase: String,
     /// Sum of container CPU limits, in cores.
     pub cpu_limit: f64,
-    /// Container images, in container order.
-    pub images: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -50,19 +48,19 @@ pub enum WidgetState {
     Pending(String),
 }
 
-/// A widget script from a `Widget` custom resource.
+/// A `Widget` custom resource as the dashboard needs it.
 #[derive(Clone)]
 pub struct CustomWidget {
-    /// Image repository it applies to, for `widget.type: auto`.
-    pub image: Option<String>,
-    pub widget: Arc<LuaWidget>,
+    /// `None` when the resource has no script (a failed generation).
+    pub widget: Option<Arc<LuaWidget>>,
+    /// Why there is no script, from the generator's status.
+    pub failure: Option<String>,
 }
 
 /// Outcome of looking up the script for a service.
 pub enum Resolved {
     Script(Arc<LuaWidget>),
     Pending(String),
-    Missing(String),
 }
 
 /// Pod health and usage for one service.
@@ -229,64 +227,41 @@ impl AppState {
             .collect()
     }
 
-    /// Image repository (no tag) of the first container of the service's
-    /// pods, taking the pod that sorts first by name.
-    pub fn service_image(&self, kube: &KubeRef) -> Option<String> {
-        let selector = Selector::parse(&kube.pod_selector);
-        let pods = self.pods.lock().unwrap();
-        let namespace = pods.get(&kube.namespace)?;
-        let mut matching: Vec<(&String, &PodInfo)> = namespace
-            .iter()
-            .filter(|(_, p)| selector.matches(&p.labels))
-            .collect();
-        matching.sort_by(|a, b| a.0.cmp(b.0));
-        let image = matching.iter().find_map(|(_, p)| p.images.first())?;
-        Some(crate::crd::split_image(image).0)
-    }
-
     /// Finds the script for a service's widget.
     ///
-    /// `widget.type: <name>` looks for a `Widget` resource of that name in
-    /// the service's namespace, then in hugin's namespace, then at the
-    /// bundled scripts. `widget.type: auto` picks the `Widget` whose
-    /// `spec.image` matches what the service's pods run.
+    /// 1. A `Widget` named like the service's `widget.type`, in the
+    ///    service's namespace, then in hugin's: hand-written ones.
+    /// 2. The `Widget` the generator wrote for this service.
+    /// 3. A script compiled into the binary.
     pub fn resolve_widget(&self, service: &Service, kind: &str) -> Resolved {
         let custom = self.custom_widgets.lock().unwrap();
-        let namespace = service.kube.as_ref().map(|k| k.namespace.as_str());
-        if kind == "auto" {
-            let Some(image) = service.kube.as_ref().and_then(|k| self.service_image(k)) else {
-                return Resolved::Pending("no running pod to identify the image".into());
-            };
-            let by_image = |ns: Option<&str>| {
-                custom
-                    .iter()
-                    .find(|((widget_ns, _), w)| {
-                        w.image.as_deref() == Some(image.as_str())
-                            && ns.is_none_or(|ns| ns == widget_ns)
-                    })
-                    .map(|(_, w)| w.widget.clone())
-            };
-            return match by_image(namespace)
-                .or_else(|| by_image(Some(&self.own_namespace)))
-                .or_else(|| by_image(None))
-            {
-                Some(widget) => Resolved::Script(widget),
-                None => Resolved::Pending(format!("no widget for {image} yet")),
-            };
-        }
-        let lookup = |ns: &str| {
+        let namespace = service
+            .kube
+            .as_ref()
+            .map_or(self.own_namespace.as_str(), |k| k.namespace.as_str());
+        let script = |ns: &str, name: &str| {
             custom
-                .get(&(ns.to_string(), kind.to_string()))
-                .map(|w| w.widget.clone())
+                .get(&(ns.to_string(), name.to_string()))
+                .and_then(|w| w.widget.clone())
         };
-        match namespace
-            .and_then(lookup)
-            .or_else(|| lookup(&self.own_namespace))
-            .or_else(|| self.registry.get(kind))
+        if let Some(widget) = script(namespace, kind).or_else(|| script(&self.own_namespace, kind))
         {
-            Some(widget) => Resolved::Script(widget),
-            None => Resolved::Missing(format!("unsupported widget type \"{kind}\"")),
+            return Resolved::Script(widget);
         }
+        let generated = service.generated_widget_name();
+        if let Some(widget) = script(namespace, &generated) {
+            return Resolved::Script(widget);
+        }
+        if let Some(widget) = self.registry.get(kind) {
+            return Resolved::Script(widget);
+        }
+        let failure = custom
+            .get(&(namespace.to_string(), generated))
+            .and_then(|w| w.failure.clone());
+        Resolved::Pending(match failure {
+            Some(reason) => format!("no widget: {reason}"),
+            None => "waiting for a widget to be generated".to_string(),
+        })
     }
 
     /// Pod status exactly as gethomepage computes it (pod phase, not
@@ -342,6 +317,10 @@ mod tests {
     fn service(group: &str, name: &str, weight: i64) -> Service {
         Service {
             id: dom_id(&format!("{group}/{name}")),
+            source: crate::model::Source {
+                kind: crate::model::SourceKind::Ingress,
+                name: name.to_lowercase(),
+            },
             group: group.into(),
             name: name.into(),
             href: None,
@@ -358,7 +337,6 @@ mod tests {
             labels: [("app".to_string(), app.to_string())].into(),
             phase: phase.into(),
             cpu_limit,
-            images: vec![format!("ghcr.io/example/{app}:1.0")],
         }
     }
 
@@ -475,7 +453,7 @@ mod tests {
     }
 
     #[test]
-    fn widgets_resolve_by_namespace_then_shared_then_bundled() {
+    fn widgets_resolve_hand_written_then_generated_then_built_in() {
         let state = AppState::new(Config::default());
         let mut svc = service("Media", "Radarr", 0);
         svc.kube = Some(KubeRef {
@@ -483,78 +461,62 @@ mod tests {
             pod_selector: "app=a".into(),
         });
         let script = |text: &str| CustomWidget {
-            image: None,
-            widget: Arc::new(LuaWidget::new("x", text)),
+            widget: Some(Arc::new(LuaWidget::new("x", text))),
+            failure: None,
         };
         let which =
             |state: &AppState, svc: &Service, kind: &str| match state.resolve_widget(svc, kind) {
                 Resolved::Script(w) => w.script().to_string(),
                 Resolved::Pending(m) => format!("pending: {m}"),
-                Resolved::Missing(m) => format!("missing: {m}"),
             };
+        let put = |ns: &str, name: &str, w: CustomWidget| {
+            state
+                .custom_widgets
+                .lock()
+                .unwrap()
+                .insert((ns.to_string(), name.to_string()), w);
+        };
 
         assert!(
             which(&state, &svc, "radarr").contains("Radarr:"),
-            "bundled script"
+            "built-in script"
         );
         assert_eq!(
-            which(&state, &svc, "nope"),
-            "missing: unsupported widget type \"nope\""
+            which(&state, &svc, "auto"),
+            "pending: waiting for a widget to be generated"
         );
 
-        state.custom_widgets.lock().unwrap().insert(
-            (state.own_namespace.clone(), "radarr".into()),
-            script("-- shared"),
-        );
-        assert_eq!(which(&state, &svc, "radarr"), "-- shared");
-        state.custom_widgets.lock().unwrap().insert(
-            ("media".into(), "radarr".into()),
-            script("-- own namespace"),
-        );
-        assert_eq!(which(&state, &svc, "radarr"), "-- own namespace");
-        // A static service has no namespace: shared and bundled only.
-        assert_eq!(
-            which(&state, &service("Infra", "X", 0), "radarr"),
-            "-- shared"
-        );
-    }
-
-    #[test]
-    fn auto_widgets_resolve_by_pod_image() {
-        let state = AppState::new(Config::default());
-        let mut svc = service("Apps", "A", 0);
-        svc.kube = Some(kube_ref("app=a"));
-        let which = |state: &AppState| match state.resolve_widget(&svc, "auto") {
-            Resolved::Script(w) => w.script().to_string(),
-            Resolved::Pending(m) => format!("pending: {m}"),
-            Resolved::Missing(m) => format!("missing: {m}"),
-        };
-        assert_eq!(
-            which(&state),
-            "pending: no running pod to identify the image"
-        );
-
-        state.pods.lock().unwrap().insert(
-            "ns".into(),
-            HashMap::from([("a-1".to_string(), pod("Running", "a", 0.0))]),
-        );
-        assert_eq!(
-            state.service_image(&kube_ref("app=a")).as_deref(),
-            Some("ghcr.io/example/a")
-        );
-        assert_eq!(
-            which(&state),
-            "pending: no widget for ghcr.io/example/a yet"
-        );
-
-        state.custom_widgets.lock().unwrap().insert(
-            (state.own_namespace.clone(), "auto-a".into()),
+        // A failed generation explains itself.
+        put(
+            "media",
+            "auto-radarr",
             CustomWidget {
-                image: Some("ghcr.io/example/a".into()),
-                widget: Arc::new(LuaWidget::new("auto-a", "-- generated")),
+                widget: None,
+                failure: Some("HTTP 500".into()),
             },
         );
-        assert_eq!(which(&state), "-- generated");
+        assert_eq!(which(&state, &svc, "auto"), "pending: no widget: HTTP 500");
+
+        // The generated widget beats the built-in one...
+        put("media", "auto-radarr", script("-- generated"));
+        assert_eq!(which(&state, &svc, "radarr"), "-- generated");
+        // ...a shared hand-written one beats the generated one...
+        put(&state.own_namespace, "radarr", script("-- shared"));
+        assert_eq!(which(&state, &svc, "radarr"), "-- shared");
+        // ...and one in the service's own namespace beats that.
+        put("media", "radarr", script("-- own namespace"));
+        assert_eq!(which(&state, &svc, "radarr"), "-- own namespace");
+
+        // A generated widget in another namespace is not this service's.
+        let mut other = service("Media", "Radarr", 0);
+        other.kube = Some(KubeRef {
+            namespace: "elsewhere".into(),
+            pod_selector: "app=a".into(),
+        });
+        assert_eq!(
+            which(&state, &other, "auto"),
+            "pending: waiting for a widget to be generated"
+        );
     }
 
     #[test]
