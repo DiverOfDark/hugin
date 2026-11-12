@@ -489,6 +489,11 @@ pub fn page(state: &AppState) -> String {
                     }
                 }
                 (bookmarks(state))
+                footer.foot {
+                    a href="https://github.com/DiverOfDark/hugin" target="_blank" rel="noreferrer" {
+                        "Hugin " (env!("CARGO_PKG_VERSION")) " on GitHub"
+                    }
+                }
             }
         }
     }
@@ -612,6 +617,7 @@ mod tests {
         assert!(html.contains("dashboard-icons/png/argo-cd.png"));
         assert!(html.contains(r#"action="https://www.google.com/search""#));
         assert!(html.contains("github.com"));
+        assert!(html.contains(r#"href="https://github.com/DiverOfDark/hugin""#));
         // No pods known: the card and the summary both say so.
         assert!(html.contains(r#"<span class="state warn">not found</span>"#));
         assert!(html.contains("1 of 2 services need attention: "));
