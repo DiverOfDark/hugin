@@ -10,7 +10,9 @@ Hugin reads the `gethomepage.dev/*` annotations of [gethomepage](https://gethome
 
 - Service discovery from Ingress annotations, and optionally from Traefik `IngressRoute` objects.
 - A status dot per service from pod phase, plus CPU and memory of the pods.
-- Widgets for Argo CD, Grafana, Nextcloud, Prometheus, ruTorrent, Suwayomi, Traefik, FRITZ!Box, Pi-hole, Paperless-ngx, Sonarr, Radarr, Jackett and Seerr (Jellyseerr, Overseerr).
+- Widgets are sandboxed Lua scripts. Fourteen are built in: Argo CD, Grafana, Nextcloud, Prometheus, ruTorrent, Suwayomi, Traefik, FRITZ!Box, Pi-hole, Paperless-ngx, Sonarr, Radarr, Jackett and Seerr (Jellyseerr, Overseerr).
+- Your own widgets as `Widget` resources in the cluster, with no rebuild.
+- An optional generator that writes a widget for any service with a language model and validates it against the live service.
 - Widget credentials read from Kubernetes Secrets by reference, with RBAC limited to the Secrets you name.
 - Header with cluster and node CPU and memory, Open-Meteo weather and a search box.
 - Static entries and bookmarks from configuration.
@@ -114,11 +116,91 @@ Secrets are cached for five minutes, so a rotated key is picked up within that t
 | `jackett` | Configured, Errored | `key`, or `password` if an admin password is set. |
 | `seerr`, `jellyseerr`, `overseerr` | Pending, Approved, Completed | `key`. `fields` may add `available`, `processing`, `issues`. |
 
-A widget shows at most four values. Numbers are formatted the way gethomepage formats them.
+A widget shows at most six values; the built-in ones show up to four. Numbers are formatted the way gethomepage formats them.
 
 When an upstream call fails, the card shows "API Error" with a short reason such as `HTTP 401` or `timeout`. The reason never includes the URL, because some APIs carry the key in the query string.
 
 A widget that already shows values keeps them, dimmed, through two failed refreshes in a row. The error replaces them on the third.
+
+### Your own widgets
+
+Every widget is a Lua script. The built-in ones are the files in [`widgets/`](widgets); the API they use is described in [docs/widget-api.md](docs/widget-api.md).
+
+To add one, create a `Widget` resource:
+
+```yaml
+apiVersion: hugin.dev/v1alpha1
+kind: Widget
+metadata:
+  name: trackhound
+  namespace: trackhound
+spec:
+  script: |
+    local orders = http.get("/orders"):check():json()
+    return {
+      { label = "Orders", value = fmt.number(#orders) },
+    }
+```
+
+and select it on the Ingress with `gethomepage.dev/widget.type: trackhound` and a `widget.url`.
+
+hugin looks for a `Widget` with that name in the Ingress's own namespace, then in hugin's namespace, then among the built-in scripts. So a `Widget` named `radarr` replaces the built-in Radarr widget, for one namespace or for all.
+
+A changed script is used at the next refresh, which is within seconds while the page is open.
+
+A script runs in a sandbox:
+
+- It can make HTTP requests only to the host in the service's `widget.url`.
+- It never sees a credential. `secret("key")` returns a placeholder that hugin swaps in when the request is sent.
+- It has no files, no operating system access and no way to load other code.
+- Each run is limited to 12 requests, 32 MiB of memory and a fixed instruction budget.
+
+### Generated widgets
+
+Set `gethomepage.dev/widget.type: auto` and hugin picks the `Widget` whose `spec.image` matches the image the service's pods run. Until one exists, the card says so.
+
+The generator writes those widgets. Enable it in the chart:
+
+```yaml
+generator:
+  enabled: true
+  model: gpt-5-mini
+  apiKeySecret:
+    name: hugin-ai
+    key: OPENAI_API_KEY
+```
+
+It works with any OpenAI-compatible chat-completions API; set `generator.apiUrl` for another provider or a local model.
+
+For each `auto` service without a widget, the generator:
+
+1. Finds the image the service's pods run.
+2. Probes a few well-known paths, such as `/openapi.json`, without credentials.
+3. Asks the model for a script, giving it the script API, three built-in scripts as examples, and the probe results.
+4. Runs the script against the service, in the same sandbox the dashboard uses.
+5. Sends errors and the request trace back to the model, up to `generator.rounds` times.
+6. Stores the first script that returns a sensible card as a `Widget` named `auto-<image>` in hugin's namespace.
+
+`kubectl get widgets -A` lists them with their status. `kubectl get widget <name> -o yaml` shows the script.
+
+Things to know:
+
+- **The model never sees credentials.** They are placeholders in the script and are redacted from response bodies. It does see the rest of what the service answers.
+- **A service that needs a credential still needs the annotation.** Add `hugin.dev/widget.key-from-secret` (or `password`, `username`) as for any widget.
+- **`gethomepage.dev/widget.hint`** tells the model what you would like to see, in plain words.
+- **One widget per image.** Two services running the same image share it.
+- **Hand-written widgets win.** The generator never writes over a `Widget` it did not create, and skips an image that already has one with `spec.image` set.
+- **Regenerate** by deleting the `Widget`, or by adding the annotation `hugin.dev/regenerate` to it. A change of the image's major version also regenerates.
+- **A failed generation** leaves a `Widget` with `status.phase: Failed` and the reason, and is retried after `generator.retryHours`.
+- **The dashboard does not need the generator.** It runs as a separate Deployment and only writes `Widget` resources.
+
+To try a generation without storing anything:
+
+```bash
+hugin draft <namespace>/<ingress> --ai-model gpt-5-mini --hint "queue length and failures"
+```
+
+This prints the script, which you can paste into a `Widget` and edit. It needs `HUGIN_AI_KEY` and a kubeconfig.
 
 ## Configuration
 
@@ -132,6 +214,7 @@ The chart renders its `config` value to `/config/config.json`. All keys are opti
 | `groupOrder` | Groups to show first, in this order. The rest follow alphabetically. | `[]` |
 | `discovery.ingress` | Read Ingress annotations. | `true` |
 | `discovery.traefikIngressRoutes` | Also read annotations on Traefik `IngressRoute` objects. | `false` |
+| `discovery.widgets` | Load widget scripts from `Widget` resources. | `true` |
 | `header.cluster.show`, `header.cluster.label` | Cluster-wide CPU and memory. | `true`, `cluster` |
 | `header.nodes.show` | CPU and memory per node. | `true` |
 | `header.weather` | `label`, `latitude`, `longitude`, `timezone`, `units` (`metric` or `imperial`), `cacheMinutes`, `maximumFractionDigits`. | off |
@@ -201,13 +284,18 @@ The chart creates a ClusterRole with read access to:
 
 - Ingresses, to discover services.
 - IngressRoutes, only when `discovery.traefikIngressRoutes` is on.
+- `Widget` resources, only when `discovery.widgets` is on.
 - Pods, for status dots and CPU limits.
 - Nodes, for capacity and readiness.
 - `metrics.k8s.io` nodes and pods, for usage.
 
 Secrets are not in the ClusterRole. They are granted by name through `secretAccess`.
 
+The generator, when enabled, has its own service account. It can read Ingresses, Pods and `Widget` resources, read the same named Secrets, and write `Widget` resources in hugin's namespace only.
+
 Anyone who can annotate an Ingress can make Hugin call the URL in `widget.url`. Treat that the same as you treat who may create Ingresses.
+
+Anyone who can create a `Widget` in a namespace can run a script against the services of that namespace, with their widget credentials attached to its requests. A `Widget` in hugin's own namespace applies to every namespace.
 
 ## Differences from gethomepage
 
@@ -216,7 +304,7 @@ Anyone who can annotate an Ingress can make Hugin call the URL in `widget.url`. 
 - The ruTorrent widget sends a form content type with its request.
 - Values refresh on the server on a timer and are shared by all viewers, instead of each browser polling.
 - Each request to a service opens a new connection. Idle connections are not kept.
-- Only the widgets listed above exist.
+- Widgets are Lua scripts, so new ones do not need a release. Only the fourteen listed above are built in.
 
 ## Development
 
@@ -227,6 +315,6 @@ cargo run -- --config ./config.json --bind 127.0.0.1:8080 --ops-bind 127.0.0.1:8
 
 With a kubeconfig, Hugin runs against that cluster. `--no-kube` runs without a cluster and shows only static services.
 
-Every widget implements one trait, `Widget`, in `src/widgets/`, and reaches the network only through the `Http` trait. Each has unit tests against a recorded upstream response in `fixtures/`.
+Each built-in widget is a Lua script in `widgets/`, compiled into the binary and tested in `src/widgets/bundled_tests.rs` against a recorded upstream response from `fixtures/`. Scripts reach the network only through the `Http` trait, which the tests replace.
 
-To add a widget: create `src/widgets/<name>.rs`, implement `Widget`, add a fixture and tests, and register it in `Registry::default()` in `src/widgets/mod.rs`.
+To add a built-in widget: write `widgets/<name>.lua`, add its name to `BUNDLED` in `src/widgets/mod.rs`, and add a fixture and a test.

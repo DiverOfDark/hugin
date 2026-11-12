@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use crate::metrics::{FetchLabels, ResourceLabels, SourceLabels, WidgetLabels};
 use crate::model::{Service, WidgetSpec};
 use crate::secrets::SecretReader;
-use crate::state::{AppState, WidgetState};
-use crate::widgets::{Http, WidgetConfig, WidgetData};
+use crate::state::{AppState, Resolved, WidgetState};
+use crate::widgets::{Http, Widget, WidgetConfig, WidgetData};
 
 const CONCURRENT_WIDGETS: usize = 6;
 const SENSITIVE: [&str; 3] = ["key", "password", "token"];
@@ -37,20 +37,26 @@ impl CredentialSource {
 /// Merges plain parameters with referenced Secrets. A readable Secret wins;
 /// when it cannot be read the plain parameter is the fallback, and without
 /// one the widget fails with the reason.
+///
+/// Credentials end up in `WidgetConfig::secrets`, where scripts can use but
+/// not read them: everything that came from a Secret, plus plain parameters
+/// named key, password or token.
 pub async fn resolve(
     spec: &WidgetSpec,
     secrets: &SecretReader,
 ) -> Result<(WidgetConfig, CredentialSource), String> {
-    let mut params: BTreeMap<String, String> = spec.params.clone();
+    let mut cfg = WidgetConfig::default();
+    let mut plain: BTreeMap<String, String> = spec.params.clone();
     let mut from_secret = false;
     let mut fell_back = false;
     for (field, reference) in &spec.secrets {
         match secrets.get(reference).await {
             Ok(value) => {
-                params.insert(field.clone(), value);
+                plain.remove(field);
+                cfg.secrets.insert(field.clone(), value);
                 from_secret = true;
             }
-            Err(reason) if params.contains_key(field) => {
+            Err(reason) if plain.get(field).is_some_and(|v| !v.is_empty()) => {
                 tracing::debug!(
                     field,
                     reason,
@@ -61,9 +67,15 @@ pub async fn resolve(
             Err(reason) => return Err(reason),
         }
     }
-    let has_plain_credential = params
-        .keys()
-        .any(|k| SENSITIVE.contains(&k.as_str()) && !spec.secrets.contains_key(k));
+    let mut has_plain_credential = false;
+    for (name, value) in plain {
+        if SENSITIVE.contains(&name.as_str()) {
+            has_plain_credential |= !value.is_empty();
+            cfg.secrets.insert(name, value);
+        } else {
+            cfg.params.insert(name, value);
+        }
+    }
     let source = if fell_back || has_plain_credential {
         CredentialSource::Annotation
     } else if from_secret {
@@ -71,33 +83,48 @@ pub async fn resolve(
     } else {
         CredentialSource::None
     };
-    Ok((WidgetConfig { params }, source))
+    Ok((cfg, source))
 }
 
 async fn refresh_widget(
     state: &AppState,
-    http: &dyn Http,
+    http: &Arc<dyn Http>,
     secrets: &SecretReader,
     service: &Service,
     spec: &WidgetSpec,
 ) -> CredentialSource {
     let started = Instant::now();
     let mut source = CredentialSource::None;
-    let result = match state.registry.get(&spec.kind) {
-        None => Err(format!("unsupported widget type \"{}\"", spec.kind)),
-        Some(widget) => match resolve(spec, secrets).await {
-            Err(reason) => Err(reason),
-            Ok((cfg, resolved_source)) => {
-                source = resolved_source;
-                // A widget makes a handful of sequential calls at most.
-                let budget = Duration::from_secs(state.cfg.intervals.request_timeout_seconds * 3);
-                match tokio::time::timeout(budget, widget.fetch(http, &cfg)).await {
-                    Ok(Ok(data)) => Ok(data),
-                    Ok(Err(error)) => Err(error.0),
-                    Err(_) => Err("timeout".to_string()),
-                }
+    let widget = match state.resolve_widget(service, &spec.kind) {
+        Resolved::Script(widget) => widget,
+        Resolved::Pending(reason) => {
+            let new_state = WidgetState::Pending(reason);
+            let mut widgets = state.widgets.lock().unwrap();
+            if widgets.get(&service.id) != Some(&new_state) {
+                widgets.insert(service.id.clone(), new_state);
+                state.dirty.notify_one();
             }
-        },
+            return source;
+        }
+        Resolved::Missing(reason) => {
+            if record_result(state, &service.id, Err(reason)) {
+                state.dirty.notify_one();
+            }
+            return source;
+        }
+    };
+    let result = match resolve(spec, secrets).await {
+        Err(reason) => Err(reason),
+        Ok((cfg, resolved_source)) => {
+            source = resolved_source;
+            // A widget makes a handful of sequential calls at most.
+            let budget = Duration::from_secs(state.cfg.intervals.request_timeout_seconds * 3);
+            match tokio::time::timeout(budget, widget.fetch(http.clone(), &cfg)).await {
+                Ok(Ok(data)) => Ok(data),
+                Ok(Err(error)) => Err(error.0),
+                Err(_) => Err("timeout".to_string()),
+            }
+        }
     };
 
     let outcome = if result.is_ok() { "ok" } else { "error" };
@@ -173,7 +200,7 @@ pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Ar
             let (state, http, secrets, limit) = (&state, &http, &secrets, &limit);
             async move {
                 let _permit = limit.acquire().await;
-                refresh_widget(state, http.as_ref(), secrets, service, spec).await
+                refresh_widget(state, http, secrets, service, spec).await
             }
         });
         let sources: Vec<CredentialSource> = futures::future::join_all(refreshes).await;
@@ -209,7 +236,10 @@ pub async fn widgets_loop(state: Arc<AppState>, http: Arc<dyn Http>, secrets: Ar
                 .retain(|id, _| live.contains(id.as_str()));
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = state.refresh_now.notified() => {}
+        }
         if !state.is_active() {
             state.metrics.polling_active.set(0);
         }
@@ -321,7 +351,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(cfg.key(), Some("plain"));
+        assert_eq!(cfg.secrets["key"], "plain");
+        assert!(
+            !cfg.params.contains_key("key"),
+            "credentials are not plain parameters"
+        );
+        assert_eq!(cfg.params["url"], "http://a");
         assert_eq!(source, CredentialSource::Annotation);
     }
 

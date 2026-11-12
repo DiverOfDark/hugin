@@ -61,25 +61,28 @@ impl Http for FakeHttp {
             .iter()
             .find(|r| r.method == request.method && request.url.contains(&r.url_contains))
             .map(|r| r.response.clone());
-        let url = request.url.clone();
         self.requests.lock().unwrap().push(request);
-        found.ok_or_else(|| WidgetError::new(format!("no fixture for {url}")))
+        found.ok_or_else(|| WidgetError::new("no fixture for this request"))
     }
 }
 
+/// Parameters named key, password or token become secrets, as in production.
 pub fn config(pairs: &[(&str, &str)]) -> WidgetConfig {
-    WidgetConfig {
-        params: pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect(),
+    let mut cfg = WidgetConfig::default();
+    for (k, v) in pairs {
+        if matches!(*k, "key" | "password" | "token") {
+            cfg.secrets.insert(k.to_string(), v.to_string());
+        } else {
+            cfg.params.insert(k.to_string(), v.to_string());
+        }
     }
+    cfg
 }
 
 /// `[("Label", "value"), ...]` view of the blocks, for compact assertions.
-pub fn pairs(data: &super::WidgetData) -> Vec<(&'static str, String)> {
+pub fn pairs(data: &super::WidgetData) -> Vec<(String, String)> {
     data.blocks
         .iter()
-        .map(|b| (b.label, b.value.clone()))
+        .map(|b| (b.label.clone(), b.value.clone()))
         .collect()
 }

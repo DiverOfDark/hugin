@@ -1,29 +1,23 @@
-//! Service widgets. Each widget turns one upstream API into a few labelled
-//! values ("blocks"). They all implement [`Widget`] and talk to the network
-//! only through [`Http`], so every widget is unit-tested against a recorded
-//! upstream response (see `fixtures/`).
+//! Service widgets. A widget turns one upstream API into a few labelled
+//! values ("blocks"). Every widget is a Lua script run by [`LuaWidget`]:
+//! the bundled ones live in `widgets/*.lua`, others come from `Widget`
+//! custom resources. Scripts reach the network only through [`Http`], so
+//! each bundled script is unit-tested against a recorded upstream response
+//! (see `fixtures/`).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde::de::DeserializeOwned;
 
-mod argocd;
-mod arr;
-mod fritzbox;
-mod grafana;
-mod jackett;
-mod nextcloud;
-mod paperlessngx;
-mod pihole;
-mod prometheus;
-mod rutorrent;
-mod seerr;
-mod suwayomi;
-mod traefik;
+mod lua;
 
 #[cfg(test)]
+mod bundled_tests;
+#[cfg(test)]
 pub mod testing;
+
+pub use lua::{LuaWidget, Trace, API_REFERENCE};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
@@ -35,7 +29,7 @@ pub enum Method {
 pub struct Request {
     pub method: Method,
     pub url: String,
-    pub headers: Vec<(&'static str, String)>,
+    pub headers: Vec<(String, String)>,
     pub body: Option<String>,
 }
 
@@ -58,8 +52,8 @@ impl Request {
         }
     }
 
-    pub fn header(mut self, name: &'static str, value: impl Into<String>) -> Self {
-        self.headers.push((name, value.into()));
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
         self
     }
 
@@ -80,11 +74,7 @@ pub struct Response {
 }
 
 impl Response {
-    pub fn is_success(&self) -> bool {
-        (200..300).contains(&self.status)
-    }
-
-    /// Errors on HTTP status >= 400, like gethomepage's widget API does.
+    /// Errors on HTTP status >= 400.
     pub fn ok(self) -> Result<Self, WidgetError> {
         if self.status >= 400 {
             Err(WidgetError::new(format!("HTTP {}", self.status)))
@@ -93,18 +83,13 @@ impl Response {
         }
     }
 
-    pub fn json<T: DeserializeOwned>(&self) -> Result<T, WidgetError> {
+    pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, WidgetError> {
         serde_json::from_slice(&self.body)
             .map_err(|e| WidgetError::new(format!("unexpected response: {e}")))
     }
-
-    pub fn text(&self) -> String {
-        String::from_utf8_lossy(&self.body).into_owned()
-    }
 }
 
-/// A short, user-visible reason. Never contains URLs, because several
-/// upstream APIs carry the API key in the query string.
+/// A short, user-visible reason. Never contains URLs or credentials.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WidgetError(pub String);
 
@@ -128,14 +113,14 @@ pub trait Http: Send + Sync {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
-    pub label: &'static str,
+    pub label: String,
     pub value: String,
 }
 
 impl Block {
-    pub fn new(label: &'static str, value: impl Into<String>) -> Self {
+    pub fn new(label: impl Into<String>, value: impl Into<String>) -> Self {
         Self {
-            label,
+            label: label.into(),
             value: value.into(),
         }
     }
@@ -165,10 +150,12 @@ impl From<Vec<Block>> for WidgetData {
     }
 }
 
-/// Resolved widget parameters: annotations / config merged with Secrets.
+/// Resolved widget parameters. Credentials are kept apart from the plain
+/// parameters: a script can use a secret in a request but cannot read it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WidgetConfig {
     pub params: BTreeMap<String, String>,
+    pub secrets: BTreeMap<String, String>,
 }
 
 impl WidgetConfig {
@@ -180,90 +167,59 @@ impl WidgetConfig {
             .filter(|u| !u.is_empty())
             .ok_or_else(|| WidgetError::new("widget.url is not set"))
     }
-
-    pub fn get(&self, name: &str) -> Option<&str> {
-        self.params
-            .get(name)
-            .map(String::as_str)
-            .filter(|v| !v.is_empty())
-    }
-
-    pub fn key(&self) -> Option<&str> {
-        self.get("key")
-    }
-
-    pub fn require_key(&self) -> Result<&str, WidgetError> {
-        self.key()
-            .ok_or_else(|| WidgetError::new("widget.key is not set"))
-    }
-
-    pub fn basic(&self) -> Option<(&str, &str)> {
-        Some((self.get("username")?, self.get("password")?))
-    }
-
-    pub fn flag(&self, name: &str) -> bool {
-        self.get(name) == Some("true")
-    }
-
-    /// `widget.fields` as a list: accepts a JSON array or a comma list.
-    pub fn fields(&self) -> Option<Vec<String>> {
-        let raw = self.get("fields")?;
-        if let Ok(list) = serde_json::from_str::<Vec<String>>(raw) {
-            return Some(list);
-        }
-        Some(
-            raw.split(',')
-                .map(|f| f.trim().to_string())
-                .filter(|f| !f.is_empty())
-                .collect(),
-        )
-    }
 }
 
 #[async_trait]
 pub trait Widget: Send + Sync {
-    /// The `widget.type` this implementation answers to.
-    fn kind(&self) -> &'static str;
-
-    /// Labels of the blocks, shown as placeholders before the first fetch.
-    fn labels(&self, cfg: &WidgetConfig) -> Vec<&'static str>;
-
-    async fn fetch(&self, http: &dyn Http, cfg: &WidgetConfig) -> Result<WidgetData, WidgetError>;
+    async fn fetch(
+        &self,
+        http: Arc<dyn Http>,
+        cfg: &WidgetConfig,
+    ) -> Result<WidgetData, WidgetError>;
 }
 
-/// Registry of widget implementations, keyed by `widget.type`.
+macro_rules! bundled {
+    ($($name:literal),* $(,)?) => {
+        [$(($name, include_str!(concat!("../../widgets/", $name, ".lua")))),*]
+    };
+}
+
+/// The scripts compiled into the binary, by `widget.type`.
+pub const BUNDLED: [(&str, &str); 14] = bundled![
+    "argocd",
+    "fritzbox",
+    "grafana",
+    "jackett",
+    "nextcloud",
+    "paperlessngx",
+    "pihole",
+    "prometheus",
+    "radarr",
+    "rutorrent",
+    "seerr",
+    "sonarr",
+    "suwayomi",
+    "traefik",
+];
+
+/// Bundled widgets, keyed by `widget.type`.
 pub struct Registry {
-    widgets: Vec<(&'static str, Box<dyn Widget>)>,
+    widgets: Vec<(&'static str, Arc<LuaWidget>)>,
 }
 
 impl Default for Registry {
     fn default() -> Self {
-        let all: Vec<Box<dyn Widget>> = vec![
-            Box::new(argocd::Argocd),
-            Box::new(grafana::Grafana),
-            Box::new(nextcloud::Nextcloud),
-            Box::new(prometheus::Prometheus),
-            Box::new(rutorrent::Rutorrent),
-            Box::new(suwayomi::Suwayomi),
-            Box::new(traefik::Traefik),
-            Box::new(fritzbox::Fritzbox),
-            Box::new(pihole::Pihole::default()),
-            Box::new(paperlessngx::Paperlessngx),
-            Box::new(arr::Sonarr),
-            Box::new(arr::Radarr),
-            Box::new(jackett::Jackett::default()),
-            Box::new(seerr::Seerr),
-        ];
-        let mut widgets: Vec<(&'static str, Box<dyn Widget>)> = Vec::new();
-        for w in all {
-            widgets.push((w.kind(), w));
+        Self {
+            widgets: BUNDLED
+                .iter()
+                .map(|(name, script)| (*name, Arc::new(LuaWidget::new(*name, *script))))
+                .collect(),
         }
-        Self { widgets }
     }
 }
 
 impl Registry {
-    pub fn get(&self, kind: &str) -> Option<&dyn Widget> {
+    pub fn get(&self, kind: &str) -> Option<Arc<LuaWidget>> {
         // jellyseerr and overseerr are the same API as seerr.
         let kind = match kind {
             "jellyseerr" | "overseerr" => "seerr",
@@ -272,7 +228,7 @@ impl Registry {
         self.widgets
             .iter()
             .find(|(k, _)| *k == kind)
-            .map(|(_, w)| w.as_ref())
+            .map(|(_, w)| w.clone())
     }
 
     pub fn kinds(&self) -> Vec<&'static str> {
@@ -280,25 +236,19 @@ impl Registry {
     }
 }
 
-/// Keeps the first `max` configured fields, or the defaults.
-pub(crate) fn pick_fields(cfg: &WidgetConfig, defaults: &[&str], max: usize) -> Vec<String> {
-    let configured = cfg.fields().filter(|f| !f.is_empty());
-    let fields = configured.unwrap_or_else(|| defaults.iter().map(|s| s.to_string()).collect());
-    fields.into_iter().take(max).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn registry_knows_every_supported_type() {
+    fn registry_knows_every_bundled_type() {
         let registry = Registry::default();
         for kind in [
             "argocd",
             "grafana",
             "jackett",
             "jellyseerr",
+            "overseerr",
             "nextcloud",
             "paperlessngx",
             "prometheus",
@@ -322,18 +272,5 @@ mod tests {
         cfg.params
             .insert("url".into(), "http://caddy.seedbox.svc/rutorrent/".into());
         assert_eq!(cfg.url().unwrap(), "http://caddy.seedbox.svc/rutorrent");
-    }
-
-    #[test]
-    fn fields_accept_json_or_comma_list() {
-        let mut cfg = WidgetConfig::default();
-        cfg.params
-            .insert("fields".into(), r#"["apps","synced"]"#.into());
-        assert_eq!(cfg.fields().unwrap(), vec!["apps", "synced"]);
-        cfg.params.insert("fields".into(), "apps, healthy".into());
-        assert_eq!(cfg.fields().unwrap(), vec!["apps", "healthy"]);
-        assert_eq!(pick_fields(&cfg, &["x"], 1), vec!["apps"]);
-        cfg.params.remove("fields");
-        assert_eq!(pick_fields(&cfg, &["x", "y"], 4), vec!["x", "y"]);
     }
 }

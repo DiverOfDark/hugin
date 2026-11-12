@@ -50,6 +50,8 @@ pub struct Discovery {
     pub ingress: bool,
     /// Also read annotations from Traefik `IngressRoute` objects.
     pub traefik_ingress_routes: bool,
+    /// Load widget scripts from `Widget` resources (needs the CRD).
+    pub widgets: bool,
 }
 
 impl Default for Discovery {
@@ -57,6 +59,7 @@ impl Default for Discovery {
         Self {
             ingress: true,
             traefik_ingress_routes: false,
+            widgets: true,
         }
     }
 }

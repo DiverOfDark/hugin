@@ -27,6 +27,12 @@ rules:
     resources: [ingressroutes]
     verbs: [get, list, watch]
   {{- end }}
+  {{- if .Values.config.discovery.widgets }}
+  # Widget scripts stored in the cluster.
+  - apiGroups: [hugin.dev]
+    resources: [widgets]
+    verbs: [get, list, watch]
+  {{- end }}
   # Status dots (pod phase) and CPU limits for the usage percentage.
   - apiGroups: [""]
     resources: [pods]
@@ -74,6 +80,10 @@ metadata:
 roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "hugin.fullname" $ }}-secrets }
 subjects:
   - { kind: ServiceAccount, name: {{ include "hugin.fullname" $ }}, namespace: {{ $.Release.Namespace }} }
+  {{- if $.Values.generator.enabled }}
+  # The generator runs scripts against the live service to validate them.
+  - { kind: ServiceAccount, name: {{ include "hugin.fullname" $ }}-generator, namespace: {{ $.Release.Namespace }} }
+  {{- end }}
 {{- end }}
 {{- end }}
 {{- end }}

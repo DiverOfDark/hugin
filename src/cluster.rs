@@ -32,6 +32,8 @@ pub struct PodSpecLite {
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 struct ContainerLite {
     #[serde(default)]
+    image: Option<String>,
+    #[serde(default)]
     resources: Option<ResourcesLite>,
 }
 
@@ -47,7 +49,7 @@ pub struct PodStatusLite {
     phase: Option<String>,
 }
 
-type PodLite = Object<PodSpecLite, PodStatusLite>;
+pub(crate) type PodLite = Object<PodSpecLite, PodStatusLite>;
 
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct Ignored {}
@@ -116,7 +118,7 @@ struct ContainerMetrics {
     usage: UsageRaw,
 }
 
-fn ingress_service(ingress: &Ingress) -> Option<(String, Option<Service>)> {
+pub(crate) fn ingress_service(ingress: &Ingress) -> Option<(String, Option<Service>)> {
     let namespace = ingress.namespace()?;
     let name = ingress.name_any();
     let spec = ingress.spec.as_ref();
@@ -144,7 +146,7 @@ fn traefik_host(rule: &str) -> Option<&str> {
     Some(&rule[start..end])
 }
 
-fn ingressroute_service(route: &DynamicObject) -> Option<(String, Option<Service>)> {
+pub(crate) fn ingressroute_service(route: &DynamicObject) -> Option<(String, Option<Service>)> {
     let namespace = route.namespace()?;
     let name = route.name_any();
     let default_href = route.data["spec"]["routes"]
@@ -272,6 +274,94 @@ pub async fn watch_ingressroutes(state: Arc<AppState>, client: Client) {
     }
 }
 
+/// Keeps `state.custom_widgets` in step with the `Widget` resources.
+/// A widget keeps its session state as long as its script is unchanged.
+pub async fn watch_widgets(state: Arc<AppState>, client: Client) {
+    use crate::crd::WidgetResource;
+    use crate::state::CustomWidget;
+    use crate::widgets::LuaWidget;
+
+    fn entry(widget: &WidgetResource) -> Option<((String, String), Option<CustomWidget>)> {
+        let namespace = widget.metadata.namespace.clone()?;
+        let name = widget.metadata.name.clone()?;
+        let custom = widget
+            .spec
+            .script
+            .as_deref()
+            .filter(|script| !script.trim().is_empty())
+            .map(|script| CustomWidget {
+                image: widget.spec.image.clone().filter(|i| !i.is_empty()),
+                widget: Arc::new(LuaWidget::new(format!("{namespace}/{name}"), script)),
+            });
+        Some(((namespace, name), custom))
+    }
+
+    fn apply(state: &AppState, key: (String, String), new: Option<CustomWidget>) {
+        let mut widgets = state.custom_widgets.lock().unwrap();
+        let changed = match (widgets.get(&key), &new) {
+            (Some(old), Some(new)) => {
+                old.image != new.image || old.widget.script() != new.widget.script()
+            }
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            match new {
+                Some(new) => widgets.insert(key, new),
+                None => widgets.remove(&key),
+            };
+            drop(widgets);
+            // Run the new script now rather than at the next interval.
+            state.refresh_now.notify_one();
+            state.dirty.notify_one();
+        }
+    }
+
+    let api: Api<WidgetResource> = Api::all_with(client, &crate::crd::api_resource());
+    let mut seen: Option<Vec<(String, String)>> = None;
+    let mut stream =
+        std::pin::pin!(watcher::watcher(api, watcher::Config::default()).default_backoff());
+    while let Some(event) = stream.next().await {
+        match event {
+            Ok(Event::Init) => seen = Some(Vec::new()),
+            Ok(Event::InitApply(widget)) | Ok(Event::Apply(widget)) => {
+                if let Some((key, custom)) = entry(&widget) {
+                    if let Some(seen) = seen.as_mut() {
+                        seen.push(key.clone());
+                    }
+                    apply(&state, key, custom);
+                }
+            }
+            Ok(Event::InitDone) => {
+                if let Some(seen) = seen.take() {
+                    let gone: Vec<(String, String)> = state
+                        .custom_widgets
+                        .lock()
+                        .unwrap()
+                        .keys()
+                        .filter(|key| !seen.contains(key))
+                        .cloned()
+                        .collect();
+                    for key in gone {
+                        apply(&state, key, None);
+                    }
+                }
+            }
+            Ok(Event::Delete(widget)) => {
+                if let Some((key, _)) = entry(&widget) {
+                    apply(&state, key, None);
+                }
+            }
+            Err(error) => watch_error(&state, "widgets", &error),
+        }
+    }
+}
+
+/// First container image of a pod.
+pub(crate) fn pod_image(pod: &PodLite) -> Option<String> {
+    pod.spec.containers.iter().find_map(|c| c.image.clone())
+}
+
 fn pod_info(pod: &PodLite) -> Option<(String, String, PodInfo)> {
     let namespace = pod.metadata.namespace.clone()?;
     let name = pod.metadata.name.clone()?;
@@ -290,6 +380,12 @@ fn pod_info(pod: &PodLite) -> Option<(String, String, PodInfo)> {
             .and_then(|s| s.phase.clone())
             .unwrap_or_default(),
         cpu_limit,
+        images: pod
+            .spec
+            .containers
+            .iter()
+            .filter_map(|c| c.image.clone())
+            .collect(),
     };
     Some((namespace, name, info))
 }
@@ -442,6 +538,7 @@ mod tests {
         assert_eq!((ns.as_str(), name.as_str()), ("apps", "web-1"));
         assert_eq!(info.phase, "Running");
         assert_eq!(info.cpu_limit, 1.5);
+        assert_eq!(info.images, vec!["x", "y", "z"]);
         assert_eq!(info.labels["app"], "web");
     }
 

@@ -12,6 +12,8 @@ RUN mkdir -p src \
 
 COPY src ./src
 COPY assets ./assets
+COPY widgets ./widgets
+COPY docs ./docs
 COPY fixtures ./fixtures
 RUN cargo build --release --locked
 
