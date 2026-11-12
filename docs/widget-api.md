@@ -99,6 +99,99 @@ All of these return `"-"` for `nil`.
 | `fmt.rate(n, digits)` | Bytes per second: `fmt.rate(143800000, 1)` gives `143.8 MB/s`. |
 | `fmt.duration(seconds)` | `575290` gives `6d15h`. |
 
+## Examples
+
+A key in a header, and a check that the response is what was expected:
+
+```lua
+local key = secret("key") or fail("widget.key is not set")
+local counts = http.get("/api/v1/request/count", {
+  headers = { ["X-Api-Key"] = key },
+}):check():json()
+if counts.pending == nil then fail("unexpected response: no pending count") end
+
+return {
+  { label = "Pending", value = fmt.number(counts.pending) },
+  { label = "Approved", value = fmt.number(counts.approved) },
+}
+```
+
+A key in the query string, and counting over a list:
+
+```lua
+local items = http.get("/api/v3/movie", { query = { apikey = secret("key") } }):check():json()
+local missing = 0
+for _, item in ipairs(items) do
+  if item.monitored and not item.hasFile then missing = missing + 1 end
+end
+return {
+  { label = "Missing", value = fmt.number(missing) },
+  { label = "Movies", value = fmt.number(#items) },
+}
+```
+
+Basic auth with a user name that may be plain or a secret:
+
+```lua
+local stats = http.get("/api/admin/stats", {
+  basic = { secret("username") or widget.params.username, secret("password") },
+}):check():json()
+return { { label = "Dashboards", value = fmt.number(stats.dashboards) } }
+```
+
+A login that returns a session id, kept in `state` and renewed when it expires:
+
+```lua
+local function login()
+  local reply = http.post("/api/auth", json.encode({ password = secret("key") }), {
+    headers = { ["Content-Type"] = "application/json" },
+  }):json()
+  state.sid = reply.session and reply.session.sid or fail("authentication failed")
+end
+
+local function summary()
+  return http.get("/api/stats/summary", { headers = { ["X-Session"] = state.sid } })
+end
+
+if secret("key") and not state.sid then login() end
+local response = summary()
+if response.status == 401 and secret("key") then
+  login()
+  response = summary()
+end
+local data = response:check():json()
+return { { label = "Queries", value = fmt.number(data.queries.total) } }
+```
+
+An API on another port of the same host, with an XML answer read by pattern:
+
+```lua
+local base = widget.scheme .. "://" .. widget.host .. ":49000"
+local xml = http.post(base .. "/control", "<request/>", {
+  headers = { ["Content-Type"] = "text/xml" },
+}):check().body
+local uptime = tonumber(xml:match("<Uptime>(%d+)</Uptime>"))
+return { { label = "Uptime", value = fmt.duration(uptime) } }
+```
+
+A session cookie handed out by a redirect, reused on the next request:
+
+```lua
+local function list(cookie)
+  return http.get("/api/items", { headers = cookie and { Cookie = cookie } or nil })
+end
+
+local response = list(state.cookie)
+local ok, items = pcall(json.decode, response.body)
+if not ok and #response.cookies > 0 then
+  state.cookie = table.concat(response.cookies, "; ")
+  response = list(state.cookie)
+  ok, items = pcall(json.decode, response.body)
+end
+if not ok then fail("authentication failed") end
+return { { label = "Items", value = fmt.number(#items) } }
+```
+
 ## Sandbox
 
 Available from the standard library: `string`, `table`, `math`, `utf8`,

@@ -25,10 +25,10 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list]
-  # To see hand-written widgets anywhere, which it must not replace.
+  # A service's widget is written next to its Ingress, in any namespace.
   - apiGroups: [hugin.dev]
-    resources: [widgets]
-    verbs: [get, list]
+    resources: [widgets, widgets/status]
+    verbs: [get, list, create, update, patch, delete]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -39,16 +39,17 @@ roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $nam
 subjects:
   - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
 ---
-# Generated widgets are written to this namespace only.
+# The ConfigMap owns the widgets generated for static services.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ $name }}
   labels: {{- include "hugin.labels" . | nindent 4 }}
 rules:
-  - apiGroups: [hugin.dev]
-    resources: [widgets, widgets/status]
-    verbs: [get, list, create, update, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    resourceNames: [{{ include "hugin.fullname" . | quote }}]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -120,6 +121,12 @@ spec:
               value: {{ .Values.generator.rounds | quote }}
             - name: HUGIN_GENERATE_RETRY_HOURS
               value: {{ .Values.generator.retryHours | quote }}
+            - name: HUGIN_GENERATE_REVALIDATE_HOURS
+              value: {{ .Values.generator.revalidateHours | quote }}
+            - name: HUGIN_REFERENCE_URL
+              value: {{ .Values.generator.referenceUrl | quote }}
+            - name: HUGIN_CONFIGMAP
+              value: {{ include "hugin.fullname" . | quote }}
             - name: RUST_LOG
               value: {{ .Values.generator.logLevel | quote }}
             - name: POD_NAMESPACE

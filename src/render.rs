@@ -578,7 +578,6 @@ mod tests {
             labels: [("app".to_string(), "argocd".to_string())].into(),
             phase: "Running".into(),
             cpu_limit: 0.0,
-            images: Vec::new(),
         };
         state
             .pods

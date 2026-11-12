@@ -23,15 +23,15 @@ spec:
       subresources:
         status: {}
       additionalPrinterColumns:
-        - name: Image
-          type: string
-          jsonPath: .spec.image
         - name: Phase
           type: string
           jsonPath: .status.phase
         - name: Description
           type: string
           jsonPath: .spec.description
+        - name: Status
+          type: string
+          jsonPath: .status.message
           priority: 1
         - name: Age
           type: date
@@ -40,10 +40,10 @@ spec:
         openAPIV3Schema:
           type: object
           description: >-
-            A Lua widget script for the hugin dashboard. A service uses it with
-            `widget.type: <name>` (looked up in the service's namespace, then in
-            hugin's), or with `widget.type: auto` when `spec.image` matches the
-            image its pods run.
+            A Lua widget script for the hugin dashboard. The generator writes
+            one per service, named after the Ingress and owned by it. A
+            hand-written Widget named like a service's `widget.type`, in the
+            service's namespace or in hugin's, takes precedence.
           required: [spec]
           properties:
             spec:
@@ -53,13 +53,6 @@ spec:
                   type: string
                   description: The Lua script. See docs/widget-api.md in the hugin repository.
                   maxLength: 65536
-                image:
-                  type: string
-                  description: >-
-                    Image repository without a tag, for example
-                    ghcr.io/linuxserver/radarr. Services with `widget.type: auto`
-                    whose pods run this image use this widget.
-                  maxLength: 512
                 description:
                   type: string
                   maxLength: 512
@@ -76,9 +69,14 @@ spec:
                   type: string
                 generatedAt:
                   type: string
+                image:
+                  type: string
+                  nullable: true
                 imageTag:
                   type: string
                   nullable: true
+                inputHash:
+                  type: string
                 attempts:
                   type: integer
 {{- end }}
