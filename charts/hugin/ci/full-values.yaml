@@ -53,6 +53,15 @@ secretAccess:
     names: [argocd-readonly-token]
 podMonitor:
   enabled: true
+generator:
+  enabled: true
+  model: gpt-5-mini
+  reasoningEffort: low
+  apiKeySecret:
+    name: hugin-ai
+    key: OPENAI_API_KEY
+  resources:
+    requests: { cpu: 10m, memory: 24Mi }
 resources:
   requests: { cpu: 10m, memory: 24Mi }
   limits: { memory: 64Mi }

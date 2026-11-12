@@ -1,0 +1,156 @@
+{{- if .Values.generator.enabled }}
+{{- $name := printf "%s-generator" (include "hugin.fullname" .) }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+---
+# Reads what it needs to find `widget.type: auto` services and their images.
+# Secrets are granted by name through `secretAccess`, as for the dashboard.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list]
+  {{- if .Values.config.discovery.traefikIngressRoutes }}
+  - apiGroups: [traefik.io]
+    resources: [ingressroutes]
+    verbs: [get, list]
+  {{- end }}
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list]
+  # To see hand-written widgets anywhere, which it must not replace.
+  - apiGroups: [hugin.dev]
+    resources: [widgets]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: {{ $name }} }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
+---
+# Generated widgets are written to this namespace only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [hugin.dev]
+    resources: [widgets, widgets/status]
+    verbs: [get, list, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ $name }} }
+subjects:
+  - { kind: ServiceAccount, name: {{ $name }}, namespace: {{ .Release.Namespace }} }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  # Two generators would write the same widgets twice.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      # Not the dashboard's labels: its Service and Deployment select on those.
+      app.kubernetes.io/name: {{ include "hugin.name" . }}-generator
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "hugin.name" . }}-generator
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        checksum/config: {{ .Values.config | toJson | sha256sum }}
+        {{- with .Values.generator.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ $name }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: hugin
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: [generate]
+          env:
+            - name: HUGIN_CONFIG
+              value: /config/config.json
+            - name: HUGIN_AI_URL
+              value: {{ .Values.generator.apiUrl | quote }}
+            - name: HUGIN_AI_MODEL
+              value: {{ required "generator.model is required when the generator is enabled" .Values.generator.model | quote }}
+            {{- with .Values.generator.reasoningEffort }}
+            - name: HUGIN_AI_REASONING_EFFORT
+              value: {{ . | quote }}
+            {{- end }}
+            - name: HUGIN_AI_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "generator.apiKeySecret.name is required when the generator is enabled" .Values.generator.apiKeySecret.name }}
+                  key: {{ required "generator.apiKeySecret.key is required when the generator is enabled" .Values.generator.apiKeySecret.key }}
+            - name: HUGIN_GENERATE_INTERVAL
+              value: {{ .Values.generator.intervalSeconds | quote }}
+            - name: HUGIN_GENERATE_ROUNDS
+              value: {{ .Values.generator.rounds | quote }}
+            - name: HUGIN_GENERATE_RETRY_HOURS
+              value: {{ .Values.generator.retryHours | quote }}
+            - name: RUST_LOG
+              value: {{ .Values.generator.logLevel | quote }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /config
+              readOnly: true
+          resources:
+            {{- toYaml .Values.generator.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "hugin.fullname" . }}
+      {{- with .Values.generator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.generator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.generator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

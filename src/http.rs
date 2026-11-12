@@ -71,7 +71,7 @@ impl Http for Client {
                 if name.eq_ignore_ascii_case("cookie") {
                     caller_cookie = Some(value.clone());
                 } else {
-                    builder = builder.header(*name, value);
+                    builder = builder.header(name.as_str(), value);
                 }
             }
             let jar = caller_cookie
@@ -110,6 +110,9 @@ impl Http for Client {
                     .get(LOCATION)
                     .and_then(|l| l.to_str().ok())
                     .and_then(|l| url.join(l).ok());
+                // Credentials in headers and cookies must not follow a redirect
+                // to another host; hand such a redirect back as it is.
+                let next = next.filter(|n| n.host_str() == url.host_str());
                 if let Some(next) = next {
                     // 307/308 keep the method and body; everything else
                     // becomes a GET, as browsers do.

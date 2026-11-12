@@ -32,6 +32,8 @@ config:
     # Also read annotations from Traefik IngressRoute objects. Adds read
     # access to ingressroutes.traefik.io to the ClusterRole.
     traefikIngressRoutes: false
+    # Load widget scripts from Widget resources (widgets.hugin.dev).
+    widgets: true
   header:
     cluster:
       show: true
@@ -55,6 +57,38 @@ config:
 secretAccess: []
   # - namespace: argocd
   #   names: [argocd-readonly-token]
+
+# Install the Widget CustomResourceDefinition.
+crds:
+  install: true
+
+# The generator writes a Widget for every service annotated
+# `gethomepage.dev/widget.type: auto`: it asks a language model for a Lua
+# script, runs it against the service, and stores it once it works.
+# It is a separate Deployment; the dashboard itself never talks to the model.
+generator:
+  enabled: false
+  # Chat-completions endpoint of an OpenAI-compatible API.
+  apiUrl: https://api.openai.com/v1/chat/completions
+  model: ""
+  # Sent as `reasoning_effort` when set (low, medium, high).
+  reasoningEffort: ""
+  # Secret holding the API key.
+  apiKeySecret:
+    name: ""
+    key: ""
+  # Seconds between scans for services without a widget.
+  intervalSeconds: 60
+  # Attempts the model gets per service.
+  rounds: 6
+  # Hours before a failed service is tried again.
+  retryHours: 6
+  logLevel: "hugin=info,warn"
+  podAnnotations: {}
+  resources: {}
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
 
 rbac:
   # ClusterRole (read Ingresses, Pods, Nodes, metrics) and the Secret Roles.

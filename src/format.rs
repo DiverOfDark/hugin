@@ -63,10 +63,6 @@ pub fn number_max(value: f64, max_frac: usize) -> String {
     fixed(value, 0, max_frac)
 }
 
-pub fn int(value: i64) -> String {
-    fixed(value as f64, 0, 0)
-}
-
 /// `common.percent`: the value is already a percentage (19.3 -> "19%").
 pub fn percent(value: f64) -> String {
     format!("{}%", fixed(value, 0, 0))
@@ -196,7 +192,7 @@ mod tests {
         assert_eq!(number_max(0.001, 4), "0.001");
         assert_eq!(number_max(4.25, 1), "4.3");
         assert_eq!(number_max(-0.01, 1), "0");
-        assert_eq!(int(186056), "186,056");
+        assert_eq!(number(186056.0), "186,056");
     }
 
     #[test]

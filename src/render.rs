@@ -115,9 +115,9 @@ fn stats_row(health: &ServiceHealth) -> Markup {
 }
 
 fn widget_rows(state: &AppState, service: &Service) -> Markup {
-    let Some(spec) = &service.widget else {
+    if service.widget.is_none() {
         return html! {};
-    };
+    }
     let current = state.widgets.lock().unwrap().get(&service.id).cloned();
     // Set while the values on screen are older than the latest (failed) refresh.
     let stale = state
@@ -130,7 +130,7 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
         Some(WidgetState::Data(data)) => html! {
             @if !data.blocks.is_empty() {
                 div.blocks.stale[stale.is_some()] title=[stale.as_deref()] {
-                    @for b in &data.blocks { (block(b.label, Some(&b.value))) }
+                    @for b in &data.blocks { (block(&b.label, Some(&b.value))) }
                 }
             }
             @for row in &data.rows {
@@ -144,23 +144,11 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
         Some(WidgetState::Error(reason)) => html! {
             div.werr title=(reason) { "API Error" span { (reason) } }
         },
-        None => {
-            // Not fetched yet: show the widget's labels as placeholders.
-            let labels = state
-                .registry
-                .get(&spec.kind)
-                .map(|w| {
-                    w.labels(&crate::widgets::WidgetConfig {
-                        params: spec.params.clone(),
-                    })
-                })
-                .unwrap_or_default();
-            html! {
-                @if !labels.is_empty() {
-                    div.blocks { @for label in labels { (block(label, None)) } }
-                }
-            }
-        }
+        Some(WidgetState::Pending(reason)) => html! {
+            div.wpending title=(reason) { (reason) }
+        },
+        // Not fetched yet.
+        None => html! {},
     }
 }
 
@@ -474,7 +462,7 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                                 None,
                             ),
                             Some(WidgetState::Error(e)) => (Vec::new(), Some(e.clone())),
-                            None => (Vec::new(), None),
+                            Some(WidgetState::Pending(_)) | None => (Vec::new(), None),
                         };
                         let stale = state
                             .widget_failures
@@ -487,6 +475,10 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                             "blocks": blocks,
                             "error": error,
                             "staleReason": stale,
+                            "pending": match widgets.get(&s.id) {
+                                Some(WidgetState::Pending(reason)) => Some(reason.clone()),
+                                _ => None,
+                            },
                             "secretFields": spec.secrets.keys().collect::<Vec<_>>(),
                         })
                     });
@@ -562,8 +554,6 @@ mod tests {
         assert!(html.contains("dashboard-icons/png/argo-cd.png"));
         assert!(html.contains(r#"action="https://www.google.com/search""#));
         assert!(html.contains("github.com"));
-        // Placeholders for the widget before its first fetch.
-        assert!(html.contains("Out Of Sync"));
         // No pods known: orange dot, and stats say Offline.
         assert!(html.contains(r#"class="dot warn" title="not found""#));
         assert!(html.contains("Offline"));
@@ -588,6 +578,7 @@ mod tests {
             labels: [("app".to_string(), "argocd".to_string())].into(),
             phase: "Running".into(),
             cpu_limit: 0.0,
+            images: Vec::new(),
         };
         state
             .pods
@@ -633,6 +624,23 @@ mod tests {
         assert_eq!(
             snapshot(&state)["groups"][0]["services"][0]["widget"]["staleReason"],
             "timeout"
+        );
+    }
+
+    #[test]
+    fn pending_widgets_say_why() {
+        let (state, service) = state_with_service();
+        state.widgets.lock().unwrap().insert(
+            service.id.clone(),
+            WidgetState::Pending("no widget for ghcr.io/x/y yet".into()),
+        );
+        let html = card(&state, &service).into_string();
+        assert!(html.contains(r#"class="wpending""#));
+        assert!(html.contains("no widget for ghcr.io/x/y yet"));
+        assert!(!html.contains("API Error"));
+        assert_eq!(
+            snapshot(&state)["groups"][0]["services"][0]["widget"]["pending"],
+            "no widget for ghcr.io/x/y yet"
         );
     }
 

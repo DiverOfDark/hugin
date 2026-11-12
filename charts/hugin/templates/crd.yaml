@@ -1,0 +1,84 @@
+{{- if .Values.crds.install }}
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.hugin.dev
+  labels: {{- include "hugin.labels" . | nindent 4 }}
+  annotations:
+    # Uninstalling the chart must not delete hand-written widgets.
+    helm.sh/resource-policy: keep
+spec:
+  group: hugin.dev
+  scope: Namespaced
+  names:
+    kind: Widget
+    listKind: WidgetList
+    plural: widgets
+    singular: widget
+    categories: [hugin]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Image
+          type: string
+          jsonPath: .spec.image
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Description
+          type: string
+          jsonPath: .spec.description
+          priority: 1
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          description: >-
+            A Lua widget script for the hugin dashboard. A service uses it with
+            `widget.type: <name>` (looked up in the service's namespace, then in
+            hugin's), or with `widget.type: auto` when `spec.image` matches the
+            image its pods run.
+          required: [spec]
+          properties:
+            spec:
+              type: object
+              properties:
+                script:
+                  type: string
+                  description: The Lua script. See docs/widget-api.md in the hugin repository.
+                  maxLength: 65536
+                image:
+                  type: string
+                  description: >-
+                    Image repository without a tag, for example
+                    ghcr.io/linuxserver/radarr. Services with `widget.type: auto`
+                    whose pods run this image use this widget.
+                  maxLength: 512
+                description:
+                  type: string
+                  maxLength: 512
+            status:
+              type: object
+              description: Set by the generator on widgets it wrote.
+              properties:
+                phase:
+                  type: string
+                  enum: [Ready, Failed]
+                message:
+                  type: string
+                model:
+                  type: string
+                generatedAt:
+                  type: string
+                imageTag:
+                  type: string
+                  nullable: true
+                attempts:
+                  type: integer
+{{- end }}
