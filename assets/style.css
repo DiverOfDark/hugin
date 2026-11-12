@@ -18,16 +18,20 @@
 :root:has(.summary.warn) { --tint: 255, 176, 32; }
 :root:has(.summary.down) { --tint: 255, 77, 94; }
 * { box-sizing: border-box; }
-html { background: var(--bg); color-scheme: dark; scroll-padding-top: 1rem; }
-body {
-  min-height: 100vh;
-  margin: 0;
-  padding: 0 1rem 2.5rem;
+/* The glow is painted on the root so it reaches the very top of the window:
+   on the body it would start below the header's collapsed top margin. */
+html {
+  min-height: 100%;
   background:
     radial-gradient(1100px 460px at 10% -90px, rgba(var(--tint), 0.24), transparent 72%),
     radial-gradient(900px 380px at 88% -140px, rgba(var(--tint), 0.09), transparent 72%),
     var(--bg);
   background-repeat: no-repeat;
+  color-scheme: dark; scroll-padding-top: 1rem;
+}
+body {
+  margin: 0;
+  padding: 0 1rem 2.5rem;
   color: var(--text);
   font: 400 13px/1.4 var(--mono);
   font-variant-numeric: tabular-nums;
