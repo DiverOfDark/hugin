@@ -2,6 +2,7 @@ mod cluster;
 mod config;
 mod crd;
 mod discovery;
+mod favicon;
 mod format;
 mod generator;
 mod http;
@@ -285,7 +286,8 @@ async fn run(cli: ServeArgs) -> anyhow::Result<()> {
         tokio::spawn(poller::resources_loop(state.clone(), client));
     }
     tokio::spawn(poller::widgets_loop(state.clone(), http.clone(), secrets));
-    tokio::spawn(poller::weather_loop(state.clone(), http));
+    tokio::spawn(poller::weather_loop(state.clone(), http.clone()));
+    tokio::spawn(favicon::run(state.clone(), http));
     tokio::spawn(poller::render_loop(state.clone()));
 
     let public = tokio::net::TcpListener::bind(cli.bind).await?;

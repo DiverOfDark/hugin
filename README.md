@@ -66,7 +66,9 @@ The status dot is green when every matching pod is in phase `Running` or `Succee
 | `mdi-name` | Material Design Icons. |
 | `si-name` | Simple Icons. |
 
-Icons are loaded by the browser, not by Hugin.
+These icons are loaded by the browser, not by Hugin.
+
+A card without an `icon` shows the favicon of the page it links to. Hugin asks that page for its `<link rel="icon">` tags, then for `/favicon.ico`, keeps the picture in memory for a day and serves it from `/icons/<id>`. It only takes pictures from the service's own host, up to 512 kB, and only bytes that are a PNG, ICO, SVG, GIF, JPEG or WebP, so a login page is never mistaken for an icon. A service that has no favicon, or is behind a login Hugin cannot pass, shows its initial. See `favicons` under [Configuration](#configuration).
 
 ### Credentials from Secrets
 
@@ -218,6 +220,7 @@ The chart renders its `config` value to `/config/config.json`. All keys are opti
 | `title` | Page title. | `Hugin` |
 | `columns` | Most group columns on a wide screen. | `5` |
 | `showStats` | Show pod CPU and memory on each discovered service. | `true` |
+| `favicons` | `fallback` shows a service's own favicon on cards without an `icon`; `prefer` shows it on every card and keeps `icon` for services without one; `off` never fetches. | `fallback` |
 | `groupOrder` | Groups to show first, in this order. The rest follow alphabetically. | `[]` |
 | `discovery.ingress` | Read Ingress annotations. | `true` |
 | `discovery.traefikIngressRoutes` | Also read annotations on Traefik `IngressRoute` objects. | `false` |
@@ -264,6 +267,7 @@ Static entries have no status dot. They sort after discovered services, in the o
 | --- | --- | --- |
 | 8080 | `/` | The dashboard. |
 | 8080 | `/events` | Server-sent events with re-rendered fragments. |
+| 8080 | `/icons/<id>` | A service's cached favicon. |
 | 8080 | `/api/state` | The dashboard as JSON: services, status, widget values. No credentials. |
 | 8080, 8081 | `/healthz` | Liveness. |
 | 8081 | `/metrics` | Prometheus metrics. Set `podMonitor.enabled` for a PodMonitor. |

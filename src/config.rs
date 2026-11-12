@@ -18,6 +18,8 @@ pub struct Config {
     pub columns: u8,
     /// Show per-service CPU / memory under each discovered service.
     pub show_stats: bool,
+    /// Whether cards show the favicon of the page they link to.
+    pub favicons: Favicons,
     /// Explicit group order; groups not listed follow alphabetically.
     pub group_order: Vec<String>,
     pub discovery: Discovery,
@@ -34,6 +36,7 @@ impl Default for Config {
             title: "Hugin".into(),
             columns: 5,
             show_stats: true,
+            favicons: Favicons::default(),
             group_order: Vec::new(),
             discovery: Discovery::default(),
             header: Header::default(),
@@ -62,6 +65,18 @@ impl Default for Discovery {
             widgets: true,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Favicons {
+    /// Never fetch favicons.
+    Off,
+    /// Only for services without an `icon`.
+    #[default]
+    Fallback,
+    /// For every service; `icon` is used where no favicon is found.
+    Prefer,
 }
 
 #[derive(Debug, Clone, Deserialize)]

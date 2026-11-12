@@ -105,6 +105,8 @@ pub struct AppState {
     /// widgets still showing their last good values.
     pub widget_failures: Mutex<HashMap<String, (u32, String)>>,
     pub weather: Mutex<Option<WeatherNow>>,
+    /// Favicons by service id.
+    pub favicons: Mutex<HashMap<String, crate::favicon::Entry>>,
     pub view: Mutex<View>,
     pub events: broadcast::Sender<Event>,
     /// Bumped on every broadcast; lets a new SSE client tell whether the
@@ -138,6 +140,7 @@ impl AppState {
             widgets: Mutex::default(),
             widget_failures: Mutex::default(),
             weather: Mutex::default(),
+            favicons: Mutex::default(),
             view: Mutex::default(),
             events,
             version: AtomicU64::new(1),
