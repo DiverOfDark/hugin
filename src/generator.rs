@@ -1697,9 +1697,9 @@ mod tests {
         use crate::discovery::service_from_annotations;
         let service = |extra: &[(&str, &str)]| {
             let mut ann: BTreeMap<String, String> = [
-                ("gethomepage.dev/enabled", "true"),
-                ("gethomepage.dev/widget.type", "radarr"),
-                ("gethomepage.dev/widget.url", "http://radarr"),
+                ("hugin.dev/enabled", "true"),
+                ("hugin.dev/widget.type", "radarr"),
+                ("hugin.dev/widget.url", "http://radarr"),
                 (
                     "hugin.dev/widget.key-from-secret",
                     "plex-secret/RADARR_API_KEY",
@@ -1718,22 +1718,16 @@ mod tests {
         assert_eq!(hash(&base), hash(&service(&[])));
         assert_ne!(
             hash(&base),
-            hash(&service(&[(
-                "gethomepage.dev/widget.hint",
-                "show the queue"
-            )]))
+            hash(&service(&[("hugin.dev/widget.hint", "show the queue")]))
         );
         assert_ne!(
             hash(&base),
-            hash(&service(&[(
-                "gethomepage.dev/widget.url",
-                "http://radarr:7878"
-            )]))
+            hash(&service(&[("hugin.dev/widget.url", "http://radarr:7878")]))
         );
         // Unrelated annotations do not matter.
         assert_eq!(
             hash(&base),
-            hash(&service(&[("gethomepage.dev/icon", "radarr.png")]))
+            hash(&service(&[("hugin.dev/icon", "radarr.png")]))
         );
     }
 

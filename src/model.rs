@@ -87,7 +87,7 @@ impl Service {
     }
 }
 
-/// Pod health as gethomepage reports it: based on pod phase only.
+/// Pod health, judged by pod phase only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PodStatus {
     Running,
@@ -118,7 +118,7 @@ pub fn dom_id(source: &str) -> String {
 }
 
 /// A parsed `key=value,key!=value,key` label selector (equality based only,
-/// which is all gethomepage's pod-selector annotation is used for).
+/// which is all the pod-selector annotation needs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Selector(Vec<Requirement>);
 

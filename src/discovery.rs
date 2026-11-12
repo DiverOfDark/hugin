@@ -1,9 +1,7 @@
 //! Turns Ingress / IngressRoute annotations into [`Service`]s.
 //!
-//! The `gethomepage.dev/*` annotations are read unchanged, so a cluster
-//! annotated for gethomepage works without manifest edits. Every annotation
-//! may also be written with the `hugin.dev/` prefix, which wins when both are
-//! present.
+//! Every annotation starts with `hugin.dev/`; an object is listed once it
+//! carries `hugin.dev/enabled: "true"`.
 //!
 //! Credentials can be referenced instead of inlined:
 //!
@@ -19,8 +17,7 @@ use std::collections::BTreeMap;
 
 use crate::model::{dom_id, KubeRef, SecretRef, Service, Source, SourceKind, WidgetSpec};
 
-pub const LEGACY_PREFIX: &str = "gethomepage.dev/";
-pub const NATIVE_PREFIX: &str = "hugin.dev/";
+pub const PREFIX: &str = "hugin.dev/";
 const FROM_SECRET_SUFFIX: &str = "-from-secret";
 const DEFAULT_GROUP: &str = "Kubernetes";
 
@@ -34,15 +31,10 @@ pub fn service_from_annotations(
     annotations: &BTreeMap<String, String>,
     default_href: Option<String>,
 ) -> Option<Service> {
-    // Later prefixes override earlier ones.
-    let mut fields: BTreeMap<&str, &str> = BTreeMap::new();
-    for prefix in [LEGACY_PREFIX, NATIVE_PREFIX] {
-        for (key, value) in annotations {
-            if let Some(field) = key.strip_prefix(prefix) {
-                fields.insert(field, value.trim());
-            }
-        }
-    }
+    let fields: BTreeMap<&str, &str> = annotations
+        .iter()
+        .filter_map(|(key, value)| Some((key.strip_prefix(PREFIX)?, value.trim())))
+        .collect();
 
     if fields.get("enabled").copied() != Some("true") {
         return None;
@@ -55,11 +47,6 @@ pub fn service_from_annotations(
             continue;
         };
         if let Some(target) = widget_field.strip_suffix(FROM_SECRET_SUFFIX) {
-            // Only the native prefix may reference Secrets.
-            let native_key = format!("{NATIVE_PREFIX}{field}");
-            if !annotations.contains_key(&native_key) {
-                continue;
-            }
             match value.split_once('/') {
                 Some((secret, key)) if !secret.is_empty() && !key.is_empty() => {
                     secrets.insert(
@@ -74,7 +61,7 @@ pub fn service_from_annotations(
                 _ => tracing::warn!(
                     namespace,
                     name,
-                    annotation = %native_key,
+                    annotation = %format!("{PREFIX}{field}"),
                     "ignoring secret reference, expected \"<secret-name>/<key>\""
                 ),
             }
@@ -142,30 +129,27 @@ mod tests {
 
     #[test]
     fn ignores_objects_that_are_not_enabled() {
-        let a = ann(&[("gethomepage.dev/name", "X")]);
+        let a = ann(&[("hugin.dev/name", "X")]);
         assert!(service_from_annotations("ingress", "ns", "x", &a, None).is_none());
-        let a = ann(&[("gethomepage.dev/enabled", "false")]);
+        let a = ann(&[("hugin.dev/enabled", "false")]);
         assert!(service_from_annotations("ingress", "ns", "x", &a, None).is_none());
     }
 
     #[test]
-    fn reads_gethomepage_annotations_unchanged() {
+    fn reads_every_field() {
         let a = ann(&[
             ("cert-manager.io/cluster-issuer", "acme"),
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/name", "Radarr"),
-            ("gethomepage.dev/href", "https://radarr.example.com"),
-            ("gethomepage.dev/group", "Media"),
-            ("gethomepage.dev/icon", "radarr.png"),
-            ("gethomepage.dev/description", "Movies"),
-            (
-                "gethomepage.dev/pod-selector",
-                "app.kubernetes.io/pod=radarr",
-            ),
-            ("gethomepage.dev/widget.type", "radarr"),
-            ("gethomepage.dev/widget.url", "http://radarr.media.svc "),
-            ("gethomepage.dev/widget.key", "plain"),
-            ("gethomepage.dev/widget.enableQueue", "false"),
+            ("hugin.dev/enabled", "true"),
+            ("hugin.dev/name", "Radarr"),
+            ("hugin.dev/href", "https://radarr.example.com"),
+            ("hugin.dev/group", "Media"),
+            ("hugin.dev/icon", "radarr.png"),
+            ("hugin.dev/description", "Movies"),
+            ("hugin.dev/pod-selector", "app.kubernetes.io/pod=radarr"),
+            ("hugin.dev/widget.type", "radarr"),
+            ("hugin.dev/widget.url", "http://radarr.media.svc "),
+            ("hugin.dev/widget.key", "plain"),
+            ("hugin.dev/widget.enableQueue", "false"),
         ]);
         let s = service_from_annotations("ingress", "media", "radarr", &a, None).unwrap();
         assert_eq!(s.name, "Radarr");
@@ -186,8 +170,8 @@ mod tests {
     }
 
     #[test]
-    fn defaults_follow_gethomepage() {
-        let a = ann(&[("gethomepage.dev/enabled", "true")]);
+    fn defaults_come_from_the_object() {
+        let a = ann(&[("hugin.dev/enabled", "true")]);
         let s = service_from_annotations(
             "ingress",
             "cilium",
@@ -209,10 +193,10 @@ mod tests {
     #[test]
     fn secret_references_are_scoped_to_the_object_namespace() {
         let a = ann(&[
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/widget.type", "grafana"),
-            ("gethomepage.dev/widget.url", "https://grafana.example.com/"),
-            ("gethomepage.dev/widget.password", "old-plaintext"),
+            ("hugin.dev/enabled", "true"),
+            ("hugin.dev/widget.type", "grafana"),
+            ("hugin.dev/widget.url", "https://grafana.example.com/"),
+            ("hugin.dev/widget.password", "old-plaintext"),
             (
                 "hugin.dev/widget.username-from-secret",
                 "grafana-admin/GF_USER",
@@ -241,24 +225,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_prefix_cannot_reference_secrets() {
-        let a = ann(&[
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/widget.type", "argocd"),
-            ("gethomepage.dev/widget.key-from-secret", "other/token"),
-        ]);
-        let w = service_from_annotations("ingress", "ns", "x", &a, None)
-            .unwrap()
-            .widget
-            .unwrap();
-        assert!(w.secrets.is_empty());
-    }
-
-    #[test]
     fn malformed_secret_reference_is_ignored() {
         let a = ann(&[
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/widget.type", "argocd"),
+            ("hugin.dev/enabled", "true"),
+            ("hugin.dev/widget.type", "argocd"),
             ("hugin.dev/widget.key-from-secret", "no-slash"),
         ]);
         let w = service_from_annotations("ingress", "ns", "x", &a, None)
@@ -266,18 +236,5 @@ mod tests {
             .widget
             .unwrap();
         assert!(w.secrets.is_empty());
-    }
-
-    #[test]
-    fn native_prefix_overrides_legacy() {
-        let a = ann(&[
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/name", "Old"),
-            ("hugin.dev/name", "New"),
-            ("hugin.dev/weight", "7"),
-        ]);
-        let s = service_from_annotations("ingress", "ns", "x", &a, None).unwrap();
-        assert_eq!(s.name, "New");
-        assert_eq!(s.weight, 7);
     }
 }

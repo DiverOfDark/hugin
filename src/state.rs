@@ -188,8 +188,7 @@ impl AppState {
         }
     }
 
-    /// All services, grouped and ordered the way gethomepage orders them:
-    /// groups alphabetically (after any configured order), services by
+    /// All services, grouped and ordered: groups alphabetically (after any configured order), services by
     /// weight then name.
     pub fn grouped_services(&self) -> Vec<(String, Vec<Service>)> {
         let mut by_group: BTreeMap<String, Vec<Service>> = BTreeMap::new();

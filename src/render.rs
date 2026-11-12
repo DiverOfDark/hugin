@@ -42,7 +42,7 @@ fn weather_icon(icon: Icon) -> Markup {
     svg(&body, "wx-icon")
 }
 
-/// Resolves an icon reference the way gethomepage does: URLs as they are,
+/// Resolves an icon reference: URLs as they are,
 /// `mdi-*` / `si-*` from their icon sets, everything else from
 /// dashboard-icons (png unless the name ends in .svg or .webp).
 fn icon(reference: &str) -> Markup {
@@ -580,15 +580,15 @@ mod tests {
         .unwrap();
         let state = AppState::new(cfg);
         let ann = [
-            ("gethomepage.dev/enabled", "true"),
-            ("gethomepage.dev/name", "Argo <CD>"),
-            ("gethomepage.dev/group", "Cluster"),
-            ("gethomepage.dev/href", "https://argo.example.com"),
-            ("gethomepage.dev/icon", "argo-cd.png"),
-            ("gethomepage.dev/pod-selector", "app=argocd"),
-            ("gethomepage.dev/widget.type", "argocd"),
-            ("gethomepage.dev/widget.url", "http://argocd"),
-            ("gethomepage.dev/widget.key", "TOPSECRET"),
+            ("hugin.dev/enabled", "true"),
+            ("hugin.dev/name", "Argo <CD>"),
+            ("hugin.dev/group", "Cluster"),
+            ("hugin.dev/href", "https://argo.example.com"),
+            ("hugin.dev/icon", "argo-cd.png"),
+            ("hugin.dev/pod-selector", "app=argocd"),
+            ("hugin.dev/widget.type", "argocd"),
+            ("hugin.dev/widget.url", "http://argocd"),
+            ("hugin.dev/widget.key", "TOPSECRET"),
         ]
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
@@ -769,9 +769,9 @@ mod tests {
         let (state, _) = state_with_service();
         for n in 0..6 {
             let ann = [
-                ("gethomepage.dev/enabled", "true".to_string()),
-                ("gethomepage.dev/name", format!("App {n}")),
-                ("gethomepage.dev/pod-selector", "app=x".to_string()),
+                ("hugin.dev/enabled", "true".to_string()),
+                ("hugin.dev/name", format!("App {n}")),
+                ("hugin.dev/pod-selector", "app=x".to_string()),
             ]
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test]
-    fn icon_references_resolve_like_gethomepage() {
+    fn icon_references_resolve_to_their_icon_sets() {
         assert!(icon("zitadel").into_string().contains("/png/zitadel.png"));
         assert!(icon("openbao.svg")
             .into_string()

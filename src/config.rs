@@ -260,7 +260,7 @@ impl Config {
         }
     }
 
-    /// Static entries as services. Like gethomepage, entry N of a group gets
+    /// Static entries as services. Entry N of a group gets
     /// weight (N+1)*100 unless set, so static entries sort after discovered
     /// ones (weight 0) and keep their configured order.
     pub fn static_services(&self) -> Vec<Service> {

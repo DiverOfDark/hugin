@@ -4,8 +4,6 @@ Hugin is a small dashboard for a Kubernetes homelab. It lists your services by r
 
 It is one Rust binary that renders HTML on the server and pushes updates to the browser over server-sent events. On a cluster with about 400 pods and 38 services it uses about 10 MiB of memory and 10 millicores while the page is open.
 
-Hugin reads the `gethomepage.dev/*` annotations of [gethomepage](https://gethomepage.dev), so a cluster annotated for gethomepage works without changing any manifest.
-
 ## Features
 
 - Service discovery from Ingress annotations, and optionally from Traefik `IngressRoute` objects.
@@ -36,7 +34,7 @@ The dashboard needs [metrics-server](https://github.com/kubernetes-sigs/metrics-
 
 ## Annotations
 
-Put these on an Ingress. Each one can be written with the `gethomepage.dev/` prefix or the `hugin.dev/` prefix. When both are present, `hugin.dev/` wins.
+Put these on an Ingress, each with the `hugin.dev/` prefix.
 
 | Annotation | Meaning | Default |
 | --- | --- | --- |
@@ -77,9 +75,9 @@ Instead of writing an API key into an annotation, reference a Secret:
 ```yaml
 metadata:
   annotations:
-    gethomepage.dev/enabled: "true"
-    gethomepage.dev/widget.type: argocd
-    gethomepage.dev/widget.url: http://argocd-server.argocd.svc.cluster.local
+    hugin.dev/enabled: "true"
+    hugin.dev/widget.type: argocd
+    hugin.dev/widget.url: http://argocd-server.argocd.svc.cluster.local
     hugin.dev/widget.key-from-secret: argocd-readonly-token/token
 ```
 
@@ -106,14 +104,14 @@ A widget is a Lua script that fetches a few numbers from a service's API for its
 A service gets a widget when its Ingress has a `widget.type`:
 
 ```yaml
-gethomepage.dev/widget.type: radarr
-gethomepage.dev/widget.url: http://radarr.media.svc.cluster.local
+hugin.dev/widget.type: radarr
+hugin.dev/widget.url: http://radarr.media.svc.cluster.local
 hugin.dev/widget.key-from-secret: plex-secret/RADARR_API_KEY
 ```
 
 | Annotation | Meaning |
 | --- | --- |
-| `widget.type` | What the service is. A gethomepage widget type such as `radarr`, any name of your own, or `auto`. |
+| `widget.type` | What the service is. The application's name, such as `radarr`, any name of your own, or `auto`. |
 | `widget.url` | Base URL of the service's API. Scripts can call this host only. |
 | `widget.hint` | Plain words for the generator: what you want to see, or how the API is reached. |
 | `widget.<field>` | Other parameters, passed to the script as `widget.params.<field>`. |
@@ -198,7 +196,7 @@ spec:
     }
 ```
 
-Select it on the Ingress with `gethomepage.dev/widget.type: trackhound`. The generator leaves a service alone once a hand-written `Widget` matches its type.
+Select it on the Ingress with `hugin.dev/widget.type: trackhound`. The generator leaves a service alone once a hand-written `Widget` matches its type.
 
 A `Widget` in hugin's namespace applies to every service with that `widget.type`, in any namespace.
 
@@ -307,13 +305,6 @@ The generator, when enabled, has its own service account. It can read Ingresses,
 Anyone who can annotate an Ingress can make Hugin call the URL in `widget.url`. Treat that the same as you treat who may create Ingresses.
 
 Anyone who can create a `Widget` in a namespace can run a script against the services of that namespace, with their widget credentials attached to its requests. A `Widget` in hugin's own namespace applies to every namespace.
-
-## Differences from gethomepage
-
-- Memory figures use 1024 for `Ki`, `Mi` and `Gi`. gethomepage multiplies by 1000, so its memory numbers read about 2 to 7 percent lower.
-- Values refresh on the server on a timer and are shared by all viewers, instead of each browser polling.
-- Each request to a service opens a new connection. Idle connections are not kept.
-- Widgets are generated Lua scripts, not code in the dashboard. What a card shows for a given application can differ from gethomepage's widget.
 
 ## Development
 

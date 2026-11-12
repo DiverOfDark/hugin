@@ -544,7 +544,7 @@ mod tests {
     fn ingress_default_href_uses_host_and_tls() {
         let ingress: Ingress = serde_json::from_value(serde_json::json!({
             "metadata": {"name": "web", "namespace": "apps",
-                         "annotations": {"gethomepage.dev/enabled": "true"}},
+                         "annotations": {"hugin.dev/enabled": "true"}},
             "spec": {"rules": [{"host": "web.example.com"}], "tls": [{"hosts": ["web.example.com"]}]}
         }))
         .unwrap();
@@ -577,7 +577,7 @@ mod tests {
         let route: DynamicObject = serde_json::from_value(serde_json::json!({
             "apiVersion": "traefik.io/v1alpha1", "kind": "IngressRoute",
             "metadata": {"name": "ceph", "namespace": "rook",
-                         "annotations": {"gethomepage.dev/enabled": "true", "gethomepage.dev/name": "Ceph"}},
+                         "annotations": {"hugin.dev/enabled": "true", "hugin.dev/name": "Ceph"}},
             "spec": {"routes": [{"match": "Host(`ceph.example.com`)", "kind": "Rule"}]}
         }))
         .unwrap();
@@ -592,7 +592,7 @@ mod tests {
     fn relist_drops_vanished_objects_of_the_same_kind_only() {
         let state = AppState::new(crate::config::Config::default());
         let svc = |kind: &str, name: &str| {
-            let ann = [("gethomepage.dev/enabled".to_string(), "true".to_string())].into();
+            let ann = [("hugin.dev/enabled".to_string(), "true".to_string())].into();
             service_from_annotations(kind, "ns", name, &ann, None).unwrap()
         };
         state

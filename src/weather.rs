@@ -46,7 +46,7 @@ struct Daily {
     sunset: Vec<String>,
 }
 
-/// WMO weather interpretation codes, with gethomepage's wording.
+/// WMO weather interpretation codes in words.
 fn condition(code: u32, day: bool) -> &'static str {
     match code {
         0 if day => "Sunny",
