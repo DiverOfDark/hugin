@@ -1,5 +1,5 @@
-//! Number formatting that matches what gethomepage shows (en locale), so the
-//! two dashboards can be compared digit for digit.
+//! Number formatting for the page and for widget scripts: English digit
+//! grouping, SI and binary byte units, short durations.
 
 const BYTE_UNITS: [&str; 9] = ["B", "kB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"];
 const BIBYTE_UNITS: [&str; 9] = ["B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"];
@@ -21,7 +21,7 @@ fn round_to(value: f64, decimals: usize) -> f64 {
     (value * p).round() / p
 }
 
-/// `Intl.NumberFormat("en", { minimumFractionDigits, maximumFractionDigits })`.
+/// Thousands separated by commas, between `min_frac` and `max_frac` decimals.
 fn fixed(value: f64, min_frac: usize, max_frac: usize) -> String {
     if !value.is_finite() {
         return "-".into();
@@ -53,22 +53,22 @@ fn fixed(value: f64, min_frac: usize, max_frac: usize) -> String {
     out
 }
 
-/// `common.number` with the default three fraction digits.
+/// A number with up to three decimals.
 pub fn number(value: f64) -> String {
     fixed(value, 0, 3)
 }
 
-/// `common.number` with an explicit `maximumFractionDigits`.
+/// A number with up to `max_frac` decimals.
 pub fn number_max(value: f64, max_frac: usize) -> String {
     fixed(value, 0, max_frac)
 }
 
-/// `common.percent`: the value is already a percentage (19.3 -> "19%").
+/// The value is already a percentage (19.3 -> "19%").
 pub fn percent(value: f64) -> String {
     format!("{}%", fixed(value, 0, 0))
 }
 
-/// JavaScript `Number(value.toPrecision(3))`.
+/// Rounds to three significant digits.
 fn precision3(value: f64) -> f64 {
     if value == 0.0 {
         return 0.0;
@@ -78,8 +78,8 @@ fn precision3(value: f64) -> f64 {
     (value * p).round() / p
 }
 
-/// `common.bytes` / `common.bbytes` (pretty-bytes). `max_frac = None` keeps
-/// three significant digits, which is the pretty-bytes default.
+/// A byte count in the largest fitting unit, powers of 1000 or (`binary`)
+/// of 1024. `max_frac = None` keeps three significant digits.
 pub fn bytes(value: f64, binary: bool, max_frac: Option<usize>) -> String {
     let units = if binary { &BIBYTE_UNITS } else { &BYTE_UNITS };
     if !value.is_finite() {
@@ -103,7 +103,7 @@ pub fn bytes(value: f64, binary: bool, max_frac: Option<usize>) -> String {
     format!("{sign}{text} {}", units[exponent])
 }
 
-/// `common.byterate`: bytes per second with a fixed number of decimals.
+/// Bytes per second with a fixed number of decimals.
 pub fn byterate(value: f64, decimals: usize) -> String {
     if !value.is_finite() || value <= 0.0 {
         return "0 B/s".into();
@@ -113,7 +113,7 @@ pub fn byterate(value: f64, decimals: usize) -> String {
     format!("{} {}/s", fixed(scaled, decimals, decimals), BYTE_UNITS[i])
 }
 
-/// `common.duration`: the two most significant units, e.g. "6d15h".
+/// The two most significant units, e.g. "6d15h".
 pub fn duration(seconds: u64) -> String {
     let mo = seconds / (3600 * 24 * 31);
     let d = (seconds % (3600 * 24 * 31)) / (3600 * 24);
