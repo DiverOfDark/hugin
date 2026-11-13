@@ -2,6 +2,8 @@
 
 Hugin is a small dashboard for a Kubernetes homelab. It lists your services by reading annotations on Ingresses, shows whether their pods are up, and adds a few numbers from each service's own API.
 
+![The Hugin dashboard: services grouped in columns, each with a status light, resource usage and a few values from its API](images/dashboard.png)
+
 It is one Rust binary that renders HTML on the server and pushes updates to the browser over server-sent events. On a cluster with about 400 pods and 38 services it uses about 10 MiB of memory and 10 millicores while the page is open.
 
 ## Features
