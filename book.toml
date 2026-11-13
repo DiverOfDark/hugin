@@ -1,0 +1,16 @@
+[book]
+title = "Hugin"
+description = "A small server-rendered dashboard for a Kubernetes homelab"
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+site-url = "/hugin/"
+git-repository-url = "https://github.com/DiverOfDark/hugin"
+edit-url-template = "https://github.com/DiverOfDark/hugin/edit/master/{path}"
