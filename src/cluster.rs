@@ -295,6 +295,13 @@ pub async fn watch_widgets(state: Arc<AppState>, client: Client) {
                 .map(|script| Arc::new(LuaWidget::new(format!("{namespace}/{name}"), script))),
             failure: (status.phase.as_deref() == Some("Failed"))
                 .then(|| status.message.unwrap_or_else(|| "generation failed".into())),
+            description: widget
+                .spec
+                .service_description
+                .as_deref()
+                .map(str::trim)
+                .filter(|d| !d.is_empty())
+                .map(str::to_string),
         };
         Some(((namespace, name), Some(custom)))
     }
@@ -304,6 +311,7 @@ pub async fn watch_widgets(state: Arc<AppState>, client: Client) {
         let changed = match (widgets.get(&key), &new) {
             (Some(old), Some(new)) => {
                 old.failure != new.failure
+                    || old.description != new.description
                     || old.widget.as_ref().map(|w| w.script())
                         != new.widget.as_ref().map(|w| w.script())
             }

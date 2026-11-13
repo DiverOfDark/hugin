@@ -490,6 +490,7 @@ mod tests {
             weight: 0,
             kube: None,
             widget: None,
+            probe: true,
         };
         let mut spec = spec(&[("url", "http://traefik")], &[]);
         spec.kind = "traefik".into();
@@ -502,6 +503,7 @@ mod tests {
                        return { { label = "Routers", value = o.http.routers.total } }"#,
                 ))),
                 failure: None,
+                description: None,
             },
         );
         let flaky = Arc::new(Flaky {

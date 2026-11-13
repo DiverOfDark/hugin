@@ -23,8 +23,13 @@ pub struct WidgetSpec {
     /// The Lua script. See docs/widget-api.md.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
+    /// What the script shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// What the service is: the second line of its card when the Ingress
+    /// has no `description`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_description: Option<String>,
 }
 
 /// Written by the generator on widgets it created.

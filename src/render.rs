@@ -11,6 +11,7 @@ use crate::format;
 use crate::model::{PodStatus, Service};
 use crate::state::{AppState, Event, NodeInfo, ServiceHealth, View, WidgetState};
 use crate::weather::Icon;
+use crate::widgets::Tone;
 
 pub const HEADER_RESOURCES_ID: &str = "hdr-resources";
 pub const HEADER_WEATHER_ID: &str = "hdr-weather";
@@ -78,9 +79,9 @@ fn icon(reference: &str) -> Markup {
     html! { img src=(url) width="32" height="32" alt="" loading="lazy" referrerpolicy="no-referrer"; }
 }
 
-fn block(label: &str, value: Option<&str>) -> Markup {
+fn block(label: &str, value: Option<&str>, tone: Tone) -> Markup {
     html! {
-        div.blk.pending[value.is_none()] {
+        div.blk.pending[value.is_none()].warn[tone == Tone::Warn].down[tone == Tone::Error] {
             div.v { (value.unwrap_or("-")) }
             div.l { (label) }
         }
@@ -122,7 +123,7 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
         Some(WidgetState::Data(data)) => html! {
             @if !data.blocks.is_empty() {
                 div.blocks.stale[stale.is_some()] title=[stale.as_deref()] {
-                    @for b in &data.blocks { (block(&b.label, Some(&b.value))) }
+                    @for b in &data.blocks { (block(&b.label, Some(&b.value), b.tone)) }
                 }
             }
             @for row in &data.rows {
@@ -144,15 +145,60 @@ fn widget_rows(state: &AppState, service: &Service) -> Markup {
     }
 }
 
+/// The light on a card.
+#[derive(Debug, Clone, PartialEq)]
+enum Light {
+    /// Nothing is known: a static entry that is not probed.
+    Off,
+    Ok(&'static str),
+    Bad(Tone, String),
+}
+
+/// Pods first, then whether the page answers: a pod can run behind a 502.
+fn light(state: &AppState, service: &Service) -> Light {
+    let pods = service.kube.as_ref().map(|k| state.health(k).status);
+    match pods {
+        Some(PodStatus::Down) => return Light::Bad(Tone::Error, PodStatus::Down.label().into()),
+        Some(status) if status != PodStatus::Running => {
+            return Light::Bad(Tone::Warn, status.label().into())
+        }
+        _ => {}
+    }
+    match (crate::probe::result(state, service), pods) {
+        (Some(Err(reason)), _) => Light::Bad(Tone::Error, reason),
+        (_, Some(status)) => Light::Ok(status.label()),
+        (Some(Ok(())), None) => Light::Ok("answers"),
+        (None, None) => Light::Off,
+    }
+}
+
+/// The worst thing a service's widget reports. A widget that cannot be
+/// read is a warning: the service itself may be fine.
+fn widget_tone(widget: Option<&WidgetState>) -> Tone {
+    match widget {
+        Some(WidgetState::Data(data)) => data.tone(),
+        Some(WidgetState::Error(_)) => Tone::Warn,
+        _ => Tone::Normal,
+    }
+}
+
 fn card(state: &AppState, service: &Service) -> Markup {
     let health = service.kube.as_ref().map(|k| state.health(k));
+    let generated_description = match service.description {
+        Some(_) => None,
+        None => state.widget_description(service),
+    };
+    let description = service
+        .description
+        .as_ref()
+        .or(generated_description.as_ref());
     let href = service
         .href
         .as_deref()
         .filter(|h| !h.is_empty() && *h != "#");
     let title = html! {
         (service.name)
-        @if let Some(description) = &service.description {
+        @if let Some(description) = description {
             p.desc { (description) }
         }
     };
@@ -170,20 +216,20 @@ fn card(state: &AppState, service: &Service) -> Markup {
     let picture = picture.unwrap_or_else(|| {
         html! { (service.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()) }
     });
-    let tone = match health.as_ref().map(|h| h.status) {
-        None | Some(PodStatus::Running) => None,
-        Some(PodStatus::Down) => Some("down"),
-        Some(_) => Some("warn"),
+    let light = light(state, service);
+    let light_tone = match &light {
+        Light::Bad(tone, _) => *tone,
+        _ => Tone::Normal,
     };
-    let widget_failed = matches!(
-        state.widgets.lock().unwrap().get(&service.id),
-        Some(WidgetState::Error(_))
-    );
     // The edge marks every card the summary names.
-    let edge = tone.or(widget_failed.then_some("warn"));
+    let edge = match light_tone.max(widget_tone(state.widgets.lock().unwrap().get(&service.id))) {
+        Tone::Normal => "ok",
+        Tone::Warn => "warn",
+        Tone::Error => "down",
+    };
     html! {
         li.svc #(service.id) data-name=(service.name) data-href=[href] {
-            div.card.(edge.unwrap_or("ok")) {
+            div.card.(edge) {
                 div.title {
                     @if let Some(href) = href {
                         a.icon.mono[initial] href=(href) target="_blank" rel="noreferrer" tabindex="-1" aria-hidden="true" { (picture) }
@@ -194,11 +240,12 @@ fn card(state: &AppState, service: &Service) -> Markup {
                     }
                     @if let Some(health) = &health {
                         @if state.cfg.show_stats { (usage(health)) }
-                        @match tone {
-                            // A healthy service gets a quiet dot; anything else says what is wrong.
-                            None => span.dot title=(health.status.label()) role="img" aria-label=(health.status.label()) {},
-                            Some(tone) => span.state.(tone) { (health.status.label()) },
-                        }
+                    }
+                    @match &light {
+                        Light::Off => {},
+                        // A healthy service gets a quiet dot; anything else says what is wrong.
+                        Light::Ok(label) => span.dot title=(label) role="img" aria-label=(label) {},
+                        Light::Bad(tone, label) => span.state.warn[*tone == Tone::Warn].down[*tone == Tone::Error] { (label) },
                     }
                 }
                 (widget_rows(state, service))
@@ -207,16 +254,24 @@ fn card(state: &AppState, service: &Service) -> Markup {
     }
 }
 
+/// A node meter turns amber here and red at [`METER_HOT`].
+const METER_WARN: f64 = 80.0;
+const METER_HOT: f64 = 90.0;
+
 fn meter(label: &str, percent: f64) -> Markup {
     let percent = if percent.is_finite() {
         percent.clamp(0.0, 100.0)
     } else {
         0.0
     };
+    let (warm, hot) = (
+        (METER_WARN..METER_HOT).contains(&percent),
+        percent >= METER_HOT,
+    );
     html! {
-        div.meter {
+        div.meter.warm[warm].hot[hot] {
             span { (label) }
-            div.bar.hot[percent >= 85.0] { div style=(format!("width:{percent:.0}%")) {} }
+            div.bar { div style=(format!("width:{percent:.0}%")) {} }
             span { (format::percent(percent)) }
         }
     }
@@ -325,11 +380,13 @@ fn summary(state: &AppState) -> Markup {
     for (_, services) in state.grouped_services() {
         for service in services {
             total += 1;
-            let status = service.kube.as_ref().map(|k| state.health(k).status);
-            let down = status.is_some_and(|status| status != PodStatus::Running);
-            any_down |= status == Some(PodStatus::Down);
-            let failed = matches!(widgets.get(&service.id), Some(WidgetState::Error(_)));
-            if down || failed {
+            let light = match light(state, &service) {
+                Light::Bad(tone, _) => tone,
+                _ => Tone::Normal,
+            };
+            let worst = light.max(widget_tone(widgets.get(&service.id)));
+            any_down |= worst == Tone::Error;
+            if worst != Tone::Normal {
                 troubled.push((service.id.clone(), service.name.clone()));
             }
         }
@@ -517,9 +574,13 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                             Some(WidgetState::Data(d)) => (
                                 d.blocks
                                     .iter()
-                                    .map(
-                                        |b| serde_json::json!({"label": b.label, "value": b.value}),
-                                    )
+                                    .map(|b| {
+                                        serde_json::json!({
+                                            "label": b.label,
+                                            "value": b.value,
+                                            "status": b.tone.label(),
+                                        })
+                                    })
                                     .collect::<Vec<_>>(),
                                 None,
                             ),
@@ -551,6 +612,11 @@ pub fn snapshot(state: &AppState) -> serde_json::Value {
                         "podSelector": s.kube.as_ref().map(|k| k.pod_selector.clone()),
                         "status": health.map(|h| h.status.label()),
                         "favicon": crate::favicon::url(state, s).is_some(),
+                        "description": s.description.clone().or_else(|| state.widget_description(s)),
+                        "page": crate::probe::result(state, s).map(|r| match r {
+                            Ok(()) => "answers".to_string(),
+                            Err(reason) => reason,
+                        }),
                         "cpu": health.and_then(|h| h.usage).map(|u| u.cpu),
                         "memory": health.and_then(|h| h.usage).map(|u| u.memory),
                         "widget": widget,
@@ -840,5 +906,130 @@ mod tests {
     fn hostname_of_bookmark() {
         assert_eq!(hostname("https://github.com/"), "github.com");
         assert_eq!(hostname("http://a.b:3902/x"), "a.b:3902");
+    }
+
+    #[test]
+    fn a_value_that_reports_a_problem_colours_the_card_and_the_summary() {
+        use crate::widgets::Tone;
+        let (state, service) = state_with_service();
+        let show = |tone| {
+            state.widgets.lock().unwrap().insert(
+                service.id.clone(),
+                WidgetState::Data(WidgetData::from(vec![
+                    Block::new("Health", "WARN").with_tone(tone),
+                    Block::new("Used", "59%"),
+                ])),
+            );
+        };
+        // The pod is missing in this fixture, which is a warning of its own.
+        state.pods.lock().unwrap().insert(
+            "argocd".into(),
+            [(
+                "argocd-0".to_string(),
+                PodInfo {
+                    labels: [("app".to_string(), "argocd".to_string())].into(),
+                    phase: "Running".into(),
+                    cpu_limit: 0.0,
+                },
+            )]
+            .into(),
+        );
+        show(Tone::Normal);
+        assert!(card(&state, &service)
+            .into_string()
+            .contains(r#"class="card ok""#));
+        assert!(!summary(&state).into_string().contains("need attention"));
+
+        show(Tone::Warn);
+        let html = card(&state, &service).into_string();
+        assert!(html.contains(r#"class="card warn""#));
+        assert!(html.contains(r#"<div class="blk warn"><div class="v">WARN</div>"#));
+        assert!(html.contains(r#"<div class="blk"><div class="v">59%</div>"#));
+        let top = summary(&state).into_string();
+        assert!(top.contains(r#"class="summary warn""#));
+        assert!(top.contains("1 of 2 services need attention"));
+
+        show(Tone::Error);
+        assert!(card(&state, &service)
+            .into_string()
+            .contains(r#"class="card down""#));
+        assert!(summary(&state)
+            .into_string()
+            .contains(r#"class="summary down""#));
+        assert_eq!(
+            snapshot(&state)["groups"][0]["services"][0]["widget"]["blocks"][0]["status"],
+            "error"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_page_that_does_not_answer_turns_the_light_red() {
+        use crate::widgets::testing::FakeHttp;
+        use crate::widgets::Method;
+        let (state, _) = state_with_service();
+        let garage = state
+            .services()
+            .into_iter()
+            .find(|s| s.name == "Garage")
+            .unwrap();
+        // Not probed yet: a static entry has no light.
+        let html = card(&state, &garage).into_string();
+        assert!(!html.contains("class=\"dot\"") && !html.contains("class=\"state"));
+
+        let up = FakeHttp::new().on(Method::Get, "garage", 403, "");
+        crate::probe::refresh(&state, &up).await;
+        assert!(card(&state, &garage)
+            .into_string()
+            .contains(r#"class="dot" title="answers""#));
+
+        let down = FakeHttp::new().on(Method::Get, "garage", 502, "");
+        crate::probe::refresh(&state, &down).await;
+        crate::probe::refresh(&state, &down).await;
+        let html = card(&state, &garage).into_string();
+        assert!(html.contains(r#"class="card down""#));
+        assert!(html.contains(r#"<span class="state down">HTTP 502</span>"#));
+        let top = summary(&state).into_string();
+        assert!(top.contains(r#"class="summary down""#));
+        assert!(top.contains(">Garage</a>"));
+        assert_eq!(
+            snapshot(&state)["groups"][1]["services"][0]["page"],
+            "HTTP 502"
+        );
+    }
+
+    #[test]
+    fn node_meters_turn_amber_then_red() {
+        assert!(meter("mem", 79.0)
+            .into_string()
+            .contains(r#"class="meter""#));
+        assert!(meter("mem", 83.0)
+            .into_string()
+            .contains(r#"class="meter warm""#));
+        assert!(meter("mem", 90.0)
+            .into_string()
+            .contains(r#"class="meter hot""#));
+    }
+
+    #[test]
+    fn a_card_without_a_description_takes_the_widget_s() {
+        use crate::state::CustomWidget;
+        use crate::widgets::LuaWidget;
+        let (state, mut service) = state_with_service();
+        state.custom_widgets.lock().unwrap().insert(
+            ("argocd".into(), "auto-argocd-server".into()),
+            CustomWidget {
+                widget: Some(Arc::new(LuaWidget::new("x", "return {}"))),
+                failure: None,
+                description: Some("GitOps <deployments>".into()),
+            },
+        );
+        assert!(card(&state, &service)
+            .into_string()
+            .contains(r#"<p class="desc">GitOps &lt;deployments&gt;</p>"#));
+        // What the owner wrote wins.
+        service.description = Some("My deploys".into());
+        let html = card(&state, &service).into_string();
+        assert!(html.contains(r#"<p class="desc">My deploys</p>"#));
+        assert!(!html.contains("GitOps"));
     }
 }

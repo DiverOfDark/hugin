@@ -19,6 +19,21 @@ return {
 Return a list of blocks, each `{ label = "...", value = "..." }`. Keep it to
 four or fewer; at most six are shown. `value` may be a string or a number.
 
+A block may carry `status = "warn"` or `status = "error"` when the value is a
+problem the application itself reports: a health state that is not OK,
+alerts firing, something stopped that should run. The value is then shown
+in amber or red and the dashboard counts the service as needing attention.
+`status = "ok"` and no status mean the same.
+
+```lua
+local health = http.get("/api/health"):check():json()
+return {
+  { label = "Health", value = health.status,
+    status = health.status ~= "OK" and "warn" or nil },
+  { label = "Used", value = fmt.percent(health.used_percent) },
+}
+```
+
 A second return value may list rows shown under the blocks, each
 `{ title = "...", detail = "...", progress = 0..100 }`.
 
