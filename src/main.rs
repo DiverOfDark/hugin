@@ -9,6 +9,7 @@ mod http;
 mod metrics;
 mod model;
 mod poller;
+mod probe;
 mod render;
 mod secrets;
 mod server;
@@ -255,6 +256,9 @@ async fn draft(args: DraftArgs) -> anyhow::Result<()> {
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if let Some(description) = &generated.description {
+        eprintln!("# description: {description}");
+    }
     println!("{}", generated.script);
     Ok(())
 }
@@ -287,7 +291,8 @@ async fn run(cli: ServeArgs) -> anyhow::Result<()> {
     }
     tokio::spawn(poller::widgets_loop(state.clone(), http.clone(), secrets));
     tokio::spawn(poller::weather_loop(state.clone(), http.clone()));
-    tokio::spawn(favicon::run(state.clone(), http));
+    tokio::spawn(favicon::run(state.clone(), http.clone()));
+    tokio::spawn(probe::run(state.clone(), http));
     tokio::spawn(poller::render_loop(state.clone()));
 
     let public = tokio::net::TcpListener::bind(cli.bind).await?;

@@ -20,6 +20,8 @@ pub struct Config {
     pub show_stats: bool,
     /// Whether cards show the favicon of the page they link to.
     pub favicons: Favicons,
+    /// Ask every service's page whether it answers.
+    pub probes: bool,
     /// Explicit group order; groups not listed follow alphabetically.
     pub group_order: Vec<String>,
     pub discovery: Discovery,
@@ -37,6 +39,7 @@ impl Default for Config {
             columns: 5,
             show_stats: true,
             favicons: Favicons::default(),
+            probes: true,
             group_order: Vec::new(),
             discovery: Discovery::default(),
             header: Header::default(),
@@ -87,6 +90,8 @@ pub struct Intervals {
     /// Polling stops this long after the last page view or SSE client.
     pub idle_after_seconds: u64,
     pub request_timeout_seconds: u64,
+    /// How often each service's page is asked whether it answers.
+    pub probe_seconds: u64,
 }
 
 impl Default for Intervals {
@@ -96,6 +101,7 @@ impl Default for Intervals {
             resources_seconds: 15,
             idle_after_seconds: 90,
             request_timeout_seconds: 10,
+            probe_seconds: 60,
         }
     }
 }
@@ -222,6 +228,9 @@ pub struct StaticService {
     pub weight: Option<i64>,
     #[serde(default)]
     pub widget: Option<StaticWidget>,
+    /// `false` to not ask `href` whether it answers.
+    #[serde(default)]
+    pub probe: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -312,6 +321,7 @@ impl Config {
                     weight: s.weight.unwrap_or(*n * 100),
                     kube: None,
                     widget,
+                    probe: s.probe.unwrap_or(true),
                 }
             })
             .collect()

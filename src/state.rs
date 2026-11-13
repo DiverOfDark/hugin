@@ -55,6 +55,8 @@ pub struct CustomWidget {
     pub widget: Option<Arc<LuaWidget>>,
     /// Why there is no script, from the generator's status.
     pub failure: Option<String>,
+    /// What the service is, for cards without a description of their own.
+    pub description: Option<String>,
 }
 
 /// Outcome of looking up the script for a service.
@@ -107,6 +109,8 @@ pub struct AppState {
     pub weather: Mutex<Option<WeatherNow>>,
     /// Favicons by service id.
     pub favicons: Mutex<HashMap<String, crate::favicon::Entry>>,
+    /// Whether each service's page answers, by service id.
+    pub probes: Mutex<HashMap<String, crate::probe::Entry>>,
     pub view: Mutex<View>,
     pub events: broadcast::Sender<Event>,
     /// Bumped on every broadcast; lets a new SSE client tell whether the
@@ -141,6 +145,7 @@ impl AppState {
             widget_failures: Mutex::default(),
             weather: Mutex::default(),
             favicons: Mutex::default(),
+            probes: Mutex::default(),
             view: Mutex::default(),
             events,
             version: AtomicU64::new(1),
@@ -234,25 +239,42 @@ impl AppState {
     /// 2. The `Widget` the generator wrote for this service.
     ///
     /// There are no scripts compiled into the binary.
-    pub fn resolve_widget(&self, service: &Service, kind: &str) -> Resolved {
+    /// The `Widget` resource a service uses: hand-written in its namespace,
+    /// hand-written in hugin's, then the generated one. Only resources with
+    /// a script count.
+    fn custom_widget(&self, service: &Service, kind: &str) -> Option<CustomWidget> {
         let custom = self.custom_widgets.lock().unwrap();
         let namespace = service
             .kube
             .as_ref()
             .map_or(self.own_namespace.as_str(), |k| k.namespace.as_str());
-        let script = |ns: &str, name: &str| {
+        let with_script = |ns: &str, name: &str| {
             custom
                 .get(&(ns.to_string(), name.to_string()))
-                .and_then(|w| w.widget.clone())
+                .filter(|w| w.widget.is_some())
+                .cloned()
         };
-        if let Some(widget) = script(namespace, kind).or_else(|| script(&self.own_namespace, kind))
-        {
+        with_script(namespace, kind)
+            .or_else(|| with_script(&self.own_namespace, kind))
+            .or_else(|| with_script(namespace, &service.generated_widget_name()))
+    }
+
+    /// What the service's widget says the service is.
+    pub fn widget_description(&self, service: &Service) -> Option<String> {
+        let spec = service.widget.as_ref()?;
+        self.custom_widget(service, &spec.kind)?.description
+    }
+
+    pub fn resolve_widget(&self, service: &Service, kind: &str) -> Resolved {
+        if let Some(widget) = self.custom_widget(service, kind).and_then(|w| w.widget) {
             return Resolved::Script(widget);
         }
+        let custom = self.custom_widgets.lock().unwrap();
+        let namespace = service
+            .kube
+            .as_ref()
+            .map_or(self.own_namespace.as_str(), |k| k.namespace.as_str());
         let generated = service.generated_widget_name();
-        if let Some(widget) = script(namespace, &generated) {
-            return Resolved::Script(widget);
-        }
         let failure = custom
             .get(&(namespace.to_string(), generated))
             .and_then(|w| w.failure.clone());
@@ -337,6 +359,7 @@ mod tests {
             weight,
             kube: None,
             widget: None,
+            probe: true,
         }
     }
 
@@ -478,6 +501,7 @@ mod tests {
         let script = |text: &str| CustomWidget {
             widget: Some(Arc::new(LuaWidget::new("x", text))),
             failure: None,
+            description: Some(format!("about {text}")),
         };
         let which =
             |state: &AppState, svc: &Service, kind: &str| match state.resolve_widget(svc, kind) {
@@ -497,6 +521,8 @@ mod tests {
             "pending: waiting for a widget to be generated"
         );
 
+        assert_eq!(state.widget_description(&svc), None);
+
         // A failed generation explains itself.
         put(
             "media",
@@ -504,6 +530,7 @@ mod tests {
             CustomWidget {
                 widget: None,
                 failure: Some("HTTP 500".into()),
+                description: None,
             },
         );
         assert_eq!(which(&state, &svc, "auto"), "pending: no widget: HTTP 500");

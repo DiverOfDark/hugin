@@ -27,12 +27,14 @@ use crate::cluster::{ingress_service, ingressroute_service, pod_image, PodLite};
 use crate::crd::{self, split_image, WidgetResource, GENERATED_LABEL};
 use crate::model::{Service, WidgetSpec};
 use crate::secrets::SecretReader;
-use crate::widgets::{Http, LuaWidget, Request, Trace, WidgetConfig, WidgetData, API_REFERENCE};
+use crate::widgets::{
+    Http, LuaWidget, Request, Tone, Trace, WidgetConfig, WidgetData, API_REFERENCE,
+};
 
 const FIELD_MANAGER: &str = "hugin-generator";
 /// Part of every widget's input hash: raise it when the prompt or the
 /// acceptance rules change in a way that existing widgets should pick up.
-const PROMPT_VERSION: u32 = 3;
+const PROMPT_VERSION: u32 = 4;
 /// A script runs every refresh on the dashboard pod. Above this many
 /// response bytes per run the model is asked for something lighter.
 const LIGHT_BYTES: usize = 300_000;
@@ -96,6 +98,8 @@ pub struct Generated {
     /// Web searches the model made.
     pub searches: u32,
     pub blocks: Vec<(String, String)>,
+    /// What the service is, in the model's words.
+    pub description: Option<String>,
 }
 
 fn system_prompt() -> String {
@@ -113,7 +117,10 @@ its source code for the version that is running, and what dashboards usually sho
 something does not work or a response is large: look for the documented parameter, filter or \
 lighter endpoint instead of trying variations.\n\
 - Finish by calling `submit_script` with a script you have already seen work. It is run once more \
-and you are told if it is not accepted.\n\
+and you are told if it is not accepted. With it you hand in `description`: what this application \
+is, for the second line of its card. Write it for the owner glancing at the page: a noun phrase \
+of two to five words such as \"Movie collection manager\" or \"Network-wide ad blocker\", no \
+application name, no version, no full stop.\n\
 - Only when research and trying have shown that the card cannot be built (the API needs a \
 credential that is not available, the service does not answer), do not submit: reply with one \
 sentence that says what is missing.\n\n\
@@ -124,6 +131,19 @@ health, usage. Labels are short (one or two words) plain English, never translat
 `app.pending`. Format numbers with `fmt`.\n\
 - Every block must be real information from the application's API. Never return filler such \
 as an HTTP status, \"Up\", a response size or a page title.\n\
+- Show what changes. Never spend a block on a version number, a build, a count of plugins or \
+modules, a configured interval, threshold or limit, or any other setting: the owner knows them \
+and they say nothing about how the service is doing.\n\
+- A reader must know what every number counts. Sizes go through `fmt.bytes`, speeds through \
+`fmt.rate`, durations through `fmt.duration`; any other quantity with a unit carries it in the \
+value (\"12/s\", \"45 ms\", \"3 days\"), and a plain count has a label that names the thing \
+counted (\"Log lines\", not \"Last 1h\").\n\
+- Mark a problem the application itself reports with `status = \"warn\"` or `status = \"error\"` \
+on the block: a health state that is not OK, alerts firing, failed or errored items, targets \
+down, something stopped or sealed that should be running. `error` is for what is broken now, \
+`warn` for what needs a look. Do not invent thresholds for ordinary counts: a queue of five or a \
+disk at 60% is not a problem, and a block that is always marked says nothing. Most blocks have \
+no status.\n\
 - Only read. Never call an endpoint that changes, deletes, restarts or triggers anything; a POST \
 is allowed only where the API uses it to log in or to query.\n\
 - The script runs every 30 seconds on a small machine. Keep what it downloads small: ask for \
@@ -243,6 +263,30 @@ pub fn extract_script(reply: &str) -> String {
     after[..end].trim().to_string()
 }
 
+/// A block that only says which version runs: `Version` as the label, or a
+/// value like `v4.0.20.3014`.
+fn is_version(label: &str, value: &str) -> bool {
+    let label = label.trim().to_lowercase();
+    if matches!(label.as_str(), "version" | "build" | "release") || label.ends_with(" version") {
+        return true;
+    }
+    let value = value.trim().trim_start_matches(['v', 'V']);
+    let parts: Vec<&str> = value.split('.').collect();
+    parts.len() >= 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// The model's description of a service, made fit for a card: one line, no
+/// full stop, not longer than a card is wide.
+fn clean_description(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line.trim_end_matches('.').trim();
+    let short: String = line.chars().take(80).collect();
+    Some(short.trim().to_string()).filter(|d| !d.is_empty())
+}
+
 /// Whether a script's output is good enough to keep.
 pub fn acceptable(data: &WidgetData) -> Result<(), String> {
     if data.blocks.is_empty() || data.blocks.len() > 4 {
@@ -267,6 +311,12 @@ pub fn acceptable(data: &WidgetData) -> Result<(), String> {
         if block.value.trim().is_empty() {
             return Err(format!("block \"{}\" has an empty value", block.label));
         }
+        if is_version(&block.label, &block.value) {
+            return Err(format!(
+                "block \"{}\" is a version number, which never changes; show something that does",
+                block.label
+            ));
+        }
     }
     let meaningless = |value: &str| matches!(value.trim(), "-" | "nil" | "null" | "NaN" | "nan");
     if data.blocks.iter().all(|b| meaningless(&b.value)) {
@@ -282,7 +332,10 @@ fn feedback(result: &Result<WidgetData, String>, traces: &[Trace]) -> String {
             json!(data
                 .blocks
                 .iter()
-                .map(|b| (&b.label, &b.value))
+                .map(|b| match b.tone {
+                    Tone::Normal => json!([b.label, b.value]),
+                    tone => json!([b.label, b.value, tone.label()]),
+                })
                 .collect::<Vec<_>>())
         ),
         Err(reason) => format!("The script failed: {reason}\n"),
@@ -316,6 +369,8 @@ struct Call {
     call_id: Option<String>,
     name: String,
     script: Option<String>,
+    /// Handed in with `submit_script`.
+    description: Option<String>,
 }
 
 /// One reply of the model.
@@ -329,6 +384,15 @@ struct Turn {
 
 fn tools(web_search: bool) -> serde_json::Value {
     let script_tool = |name: &str, description: &str| {
+        let mut properties = json!({ "script": { "type": "string", "description": "A complete Lua widget script." } });
+        let mut required = vec!["script"];
+        if name == "submit_script" {
+            properties["description"] = json!({
+                "type": "string",
+                "description": "What this application is, for its card: two to five words, such as \"Movie collection manager\".",
+            });
+            required.push("description");
+        }
         json!({
             "type": "function",
             "name": name,
@@ -336,8 +400,8 @@ fn tools(web_search: bool) -> serde_json::Value {
             "strict": true,
             "parameters": {
                 "type": "object",
-                "properties": { "script": { "type": "string", "description": "A complete Lua widget script." } },
-                "required": ["script"],
+                "properties": properties,
+                "required": required,
                 "additionalProperties": false,
             },
         })
@@ -423,6 +487,7 @@ async fn complete(
                     call_id: item["call_id"].as_str().map(str::to_string),
                     name: item["name"].as_str().unwrap_or_default().to_string(),
                     script: arguments["script"].as_str().map(str::to_string),
+                    description: arguments["description"].as_str().map(str::to_string),
                 });
             }
             Some("web_search_call") => {
@@ -489,6 +554,7 @@ pub async fn generate_script(
                     call_id: None,
                     name: "submit_script".into(),
                     script: Some(extract_script(&turn.text)),
+                    description: None,
                 });
             } else if heavy.is_some() {
                 break;
@@ -544,6 +610,10 @@ what is missing."
                                             .iter()
                                             .map(|b| (b.label.clone(), b.value.clone()))
                                             .collect(),
+                                        description: call
+                                            .description
+                                            .as_deref()
+                                            .and_then(clean_description),
                                     };
                                     if bytes <= LIGHT_BYTES {
                                         return Ok(generated);
@@ -832,12 +902,21 @@ async fn store(
             if let Some(description) = description_of(&generated.script) {
                 spec["description"] = json!(description);
             }
+            if let Some(description) = &generated.description {
+                spec["serviceDescription"] = json!(description);
+            }
         }
         Err(_) => {
             // A failed regeneration must not take away a script that works:
             // re-apply the stored one and only record the failure.
-            let current = api.get_opt(name).await?;
-            if let Some(script) = current.and_then(|w| w.spec.script) {
+            let current = api.get_opt(name).await?.map(|w| w.spec);
+            if let Some(description) = current
+                .as_ref()
+                .and_then(|s| s.service_description.as_ref())
+            {
+                spec["serviceDescription"] = json!(description);
+            }
+            if let Some(script) = current.and_then(|s| s.script) {
                 if let Some(description) = description_of(&script) {
                     spec["description"] = json!(description);
                 }
@@ -1277,11 +1356,16 @@ mod tests {
     }
 
     fn call(id: &str, tool: &str, script: &str) -> serde_json::Value {
+        let arguments = if tool == "submit_script" {
+            json!({ "script": script, "description": "Parcel tracker." })
+        } else {
+            json!({ "script": script })
+        };
         json!({
             "type": "function_call",
             "call_id": id,
             "name": tool,
-            "arguments": json!({ "script": script }).to_string(),
+            "arguments": arguments.to_string(),
         })
     }
 
@@ -1354,6 +1438,7 @@ mod tests {
         .unwrap();
         assert_eq!(generated.rounds, 2);
         assert_eq!(generated.searches, 1);
+        assert_eq!(generated.description.as_deref(), Some("Parcel tracker"));
         assert_eq!(
             generated.blocks,
             vec![
@@ -1620,6 +1705,36 @@ mod tests {
         assert!(acceptable(&data(&[("A label that is far too long", "1")])).is_err());
         assert!(acceptable(&data(&[("suwayomi.download", "1")])).is_err());
         assert!(acceptable(&data(&[("Max. Down", "1")])).is_ok());
+        // A version says nothing about how the service is doing.
+        assert!(acceptable(&data(&[("Queue", "0"), ("Version", "6")])).is_err());
+        assert!(acceptable(&data(&[("Queue", "0"), ("App version", "x")])).is_err());
+        assert!(acceptable(&data(&[("Queue", "0"), ("Running", "v4.0.20.3014")])).is_err());
+        assert!(acceptable(&data(&[("Ingest", "22,533.3/s"), ("Free", "1.5 GB")])).is_ok());
+    }
+
+    #[test]
+    fn descriptions_are_made_fit_for_a_card() {
+        assert_eq!(
+            clean_description("  Movie collection manager.\nMore text"),
+            Some("Movie collection manager".into())
+        );
+        assert_eq!(clean_description(" \n "), None);
+        assert_eq!(
+            clean_description(&"x".repeat(200)).unwrap().chars().count(),
+            80
+        );
+    }
+
+    #[test]
+    fn only_submitting_asks_for_a_description() {
+        let tools = tools(false);
+        assert_eq!(tools[0]["name"], "run_script");
+        assert_eq!(tools[0]["parameters"]["required"], json!(["script"]));
+        assert_eq!(tools[1]["name"], "submit_script");
+        assert_eq!(
+            tools[1]["parameters"]["required"],
+            json!(["script", "description"])
+        );
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub struct Service {
     pub weight: i64,
     pub kube: Option<KubeRef>,
     pub widget: Option<WidgetSpec>,
+    /// Whether to ask the page at `href` if it answers.
+    pub probe: bool,
 }
 
 impl Service {
@@ -210,6 +212,7 @@ mod tests {
             weight: 0,
             kube: None,
             widget: None,
+            probe: true,
         };
         assert_eq!(
             service(SourceKind::Ingress, "radarr").generated_widget_name(),

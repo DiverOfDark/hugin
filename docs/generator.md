@@ -22,6 +22,8 @@ For each service with a `widget.type`, the generator:
    - **`submit_script`**, which hands in the final script.
 3. Runs the submitted script against the service and stores it if it returns a sensible, small enough card. Otherwise the model is told why and continues.
 
+With the script the model hands in a description of the application, a few words such as "Movie collection manager". It is stored as `spec.serviceDescription` of the `Widget` and shown as the second line of the card, unless the Ingress has a `description` annotation of its own.
+
 The model gets `generator.steps` replies per service. It can also end with a sentence saying why the card cannot be built, which becomes the `Widget`'s failure message.
 
 The `Widget` is named `auto-<ingress name>` and lives in the service's namespace. It has an owner reference to the Ingress, so Argo CD lists it under the Ingress and it is deleted with it. Widgets for static services are owned by hugin's ConfigMap.
@@ -34,6 +36,7 @@ Things to know:
 - **The model reads web pages, which are untrusted.** A page cannot reach your cluster: searches run at the provider, and the only thing the model can do here is run sandboxed scripts against the one service. A stored script can still call any endpoint of that service with its credential, so read a generated script once.
 - **"Validated" means the script ran and returned values.** It does not prove a value means what its label says.
 - **Documented applications work best.** For an application nobody has written about, the model relies on the probes, an OpenAPI document if the service has one, and your hint.
+- **Versions and settings are refused.** A card is for what changes, so a script that returns a version number is sent back.
 - **Use `widget.hint` when it gets something wrong**, for example to name the endpoint, an undocumented parameter, or say that no API key is set.
 - **A script is written again** when the service's widget annotations change, on a major version bump of its image, when the `Widget` is deleted or annotated `hugin.dev/regenerate`, or when the stored script fails two re-checks in a row. Re-checks run every `generator.revalidateHours`.
 - **A failed generation** leaves a `Widget` with `status.phase: Failed` and the reason. It is retried after ten minutes, then every `generator.retryHours`. A script that worked before is kept and stays in use.

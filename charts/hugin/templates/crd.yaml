@@ -55,7 +55,14 @@ spec:
                   maxLength: 65536
                 description:
                   type: string
+                  description: What the script shows.
                   maxLength: 512
+                serviceDescription:
+                  type: string
+                  description: >-
+                    What the service is. Shown as the second line of its card
+                    when the Ingress has no description annotation.
+                  maxLength: 120
             status:
               type: object
               description: Set by the generator on widgets it wrote.

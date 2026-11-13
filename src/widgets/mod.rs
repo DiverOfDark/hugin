@@ -107,10 +107,40 @@ pub trait Http: Send + Sync {
     async fn send(&self, request: Request) -> Result<Response, WidgetError>;
 }
 
+/// How a value reads: plainly, or as a problem the application reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+pub enum Tone {
+    #[default]
+    Normal,
+    Warn,
+    Error,
+}
+
+impl Tone {
+    /// A block's `status` as scripts write it.
+    pub fn parse(status: &str) -> Option<Self> {
+        match status {
+            "ok" => Some(Tone::Normal),
+            "warn" => Some(Tone::Warn),
+            "error" => Some(Tone::Error),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tone::Normal => "ok",
+            Tone::Warn => "warn",
+            Tone::Error => "error",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub label: String,
     pub value: String,
+    pub tone: Tone,
 }
 
 impl Block {
@@ -118,7 +148,13 @@ impl Block {
         Self {
             label: label.into(),
             value: value.into(),
+            tone: Tone::Normal,
         }
+    }
+
+    pub fn with_tone(mut self, tone: Tone) -> Self {
+        self.tone = tone;
+        self
     }
 }
 
@@ -135,6 +171,13 @@ pub struct Row {
 pub struct WidgetData {
     pub blocks: Vec<Block>,
     pub rows: Vec<Row>,
+}
+
+impl WidgetData {
+    /// The worst thing any of the values reports.
+    pub fn tone(&self) -> Tone {
+        self.blocks.iter().map(|b| b.tone).max().unwrap_or_default()
+    }
 }
 
 impl From<Vec<Block>> for WidgetData {

@@ -8,6 +8,7 @@ The chart renders its `config` value to `/config/config.json`. All keys are opti
 | `columns` | Most group columns on a wide screen. | `5` |
 | `showStats` | Show pod CPU and memory on each discovered service. | `true` |
 | `favicons` | `fallback` shows a service's own favicon on cards without an `icon`; `prefer` shows it on every card and keeps `icon` for services without one; `off` never fetches. | `fallback` |
+| `probes` | Ask the page behind every card whether it answers, see [Services](services.md#the-light-on-a-card). | `true` |
 | `groupOrder` | Groups to show first, in this order. The rest follow alphabetically. | `[]` |
 | `discovery.ingress` | Read Ingress annotations. | `true` |
 | `discovery.traefikIngressRoutes` | Also read annotations on Traefik `IngressRoute` objects. | `false` |
@@ -22,5 +23,6 @@ The chart renders its `config` value to `/config/config.json`. All keys are opti
 | `intervals.resourcesSeconds` | How often node and pod usage refresh. | `15` |
 | `intervals.idleAfterSeconds` | Polling stops this long after the last page view. | `90` |
 | `intervals.requestTimeoutSeconds` | Timeout for one upstream request. | `10` |
+| `intervals.probeSeconds` | How often every page is asked whether it answers. | `60` |
 
 Unknown keys are rejected at startup, so a typo does not pass silently.

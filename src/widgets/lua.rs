@@ -18,7 +18,9 @@ use async_trait::async_trait;
 use mlua::{HookTriggers, Lua, LuaOptions, LuaSerdeExt, MultiValue, StdLib, Table, Value, VmState};
 use serde::Deserialize;
 
-use super::{Block, Http, Method, Request, Row, Widget, WidgetConfig, WidgetData, WidgetError};
+use super::{
+    Block, Http, Method, Request, Row, Tone, Widget, WidgetConfig, WidgetData, WidgetError,
+};
 use crate::format;
 
 /// The script API reference, for documentation and for the generator prompt.
@@ -123,6 +125,8 @@ struct RawBlock {
     label: String,
     #[serde(default)]
     value: serde_json::Value,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -486,12 +490,27 @@ fn collect(lua: &Lua, returned: MultiValue) -> Result<WidgetData, WidgetError> {
         Some(table @ Value::Table(_)) => lua.from_value(table).unwrap_or_default(),
         _ => Vec::new(),
     };
+    let blocks = blocks
+        .iter()
+        .take(MAX_BLOCKS)
+        .map(|b| {
+            let tone = match b.status.as_deref() {
+                None => Tone::Normal,
+                Some(status) => Tone::parse(status).ok_or_else(|| {
+                    WidgetError::new(format!(
+                        "block \"{}\": status must be \"ok\", \"warn\" or \"error\"",
+                        truncate(&b.label, 32)
+                    ))
+                })?,
+            };
+            Ok(
+                Block::new(truncate(&b.label, 32), truncate(&block_value(&b.value), 48))
+                    .with_tone(tone),
+            )
+        })
+        .collect::<Result<Vec<_>, WidgetError>>()?;
     Ok(WidgetData {
-        blocks: blocks
-            .iter()
-            .take(MAX_BLOCKS)
-            .map(|b| Block::new(truncate(&b.label, 32), truncate(&block_value(&b.value), 48)))
-            .collect(),
+        blocks,
         rows: rows
             .into_iter()
             .take(MAX_ROWS)
@@ -881,5 +900,33 @@ mod tests {
     fn api_reference_is_bundled() {
         assert!(API_REFERENCE.contains("secret(name)"));
         assert!(API_REFERENCE.contains("fmt.bytes"));
+    }
+
+    #[tokio::test]
+    async fn a_block_can_report_a_problem() {
+        let script = r#"
+            return {
+              { label = "Health", value = "WARN", status = "warn" },
+              { label = "Down", value = 2, status = "error" },
+              { label = "OSDs", value = "4/4", status = "ok" },
+              { label = "Used", value = "59%" },
+            }
+        "#;
+        let (result, _, _) = run(script, FakeHttp::new(), &base()).await;
+        let data = result.unwrap();
+        let tones: Vec<Tone> = data.blocks.iter().map(|b| b.tone).collect();
+        assert_eq!(
+            tones,
+            vec![Tone::Warn, Tone::Error, Tone::Normal, Tone::Normal]
+        );
+        assert_eq!(data.tone(), Tone::Error);
+
+        let (result, _, _) = run(
+            r#"return { { label = "Health", value = "x", status = "red" } }"#,
+            FakeHttp::new(),
+            &base(),
+        )
+        .await;
+        assert!(result.unwrap_err().0.contains("status must be"));
     }
 }

@@ -113,6 +113,7 @@ pub fn service_from_annotations(
             pod_selector,
         }),
         widget,
+        probe: fields.get("probe").copied() != Some("false"),
     })
 }
 

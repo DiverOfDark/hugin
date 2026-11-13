@@ -16,6 +16,8 @@ spec:
     }
 ```
 
+Add `spec.serviceDescription` to say what the service is; it becomes the second line of the card when the Ingress has no `description`.
+
 Select it on the Ingress with `hugin.dev/widget.type: trackhound`. The generator leaves a service alone once a hand-written `Widget` matches its type.
 
 A `Widget` in hugin's namespace applies to every service with that `widget.type`, in any namespace.
