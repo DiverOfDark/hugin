@@ -19,17 +19,25 @@ return {
 Return a list of blocks, each `{ label = "...", value = "..." }`. Keep it to
 four or fewer; at most six are shown. `value` may be a string or a number.
 
-A block may carry `status = "warn"` or `status = "error"` when the value is a
-problem the application itself reports: a health state that is not OK,
-alerts firing, something stopped that should run. The value is then shown
-in amber or red and the dashboard counts the service as needing attention.
-`status = "ok"` and no status mean the same.
+A block may carry `status = "warn"` or `status = "error"`. The value is then
+shown in amber or red and the dashboard counts the service as needing
+attention. `status = "ok"` and no status mean the same.
+
+| Status | Means | Examples |
+| --- | --- | --- |
+| none | Normal operation, nothing to do. | A count, a queue, a standby node, paused items. |
+| `warn` | Check it when you have time. The service still does its job and nothing is lost if it waits a day. | Health `WARN`, failed items, a target down, alerts firing, a backup overdue. |
+| `error` | Act now. The service cannot do its job, or data can be lost. | Health `ERR`, a sealed vault, no redundancy left, a full disk, the last backup failed, a critical alert. |
+
+Take the application's own severity when it has one, and take the lower
+level when unsure. The status is a condition on the value, never a constant.
 
 ```lua
 local health = http.get("/api/health"):check():json()
 return {
   { label = "Health", value = health.status,
-    status = health.status ~= "OK" and "warn" or nil },
+    status = health.status == "ERR" and "error"
+      or health.status ~= "OK" and "warn" or nil },
   { label = "Used", value = fmt.percent(health.used_percent) },
 }
 ```

@@ -30,7 +30,12 @@ A widget shows at most six values. When an upstream call fails, the card shows "
 
 ## Values that report a problem
 
-A script can mark a value as a warning or an error, for example a Ceph health that is not `OK`, alerts that fire, or a download client that has stopped. The value turns amber or red, the card gets an edge in that colour, and the line at the top of the page names the service. The generator marks what the application itself reports as a problem and leaves ordinary counts alone. Use `widget.hint` when it marks too much or too little, for example "one firing alert is normal here".
+A script can mark a value as a warning or an error. The value turns amber or red, the card gets an edge in that colour, and the line at the top of the page names the service.
+
+- **Amber** means "check this when you have time": something is degraded or has failed, but the service still does its job and nothing is lost if it waits a day. A Ceph health of `WARN`, failed downloads, a scrape target that is down, alerts that fire.
+- **Red** means "act now": the service cannot do its job, or data can be lost. A Ceph health of `ERR`, a sealed vault, storage with no redundancy left, a full disk, a failed backup, a critical alert.
+
+The generator takes the application's own severity where it has one and picks the lower level when unsure. It leaves normal states alone: a standby node, paused or skipped items, available updates, a long queue. Use `widget.hint` when it marks too much or too little, for example "one firing alert is normal here".
 
 ## Stale values
 
