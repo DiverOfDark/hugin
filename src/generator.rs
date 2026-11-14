@@ -34,7 +34,7 @@ use crate::widgets::{
 const FIELD_MANAGER: &str = "hugin-generator";
 /// Part of every widget's input hash: raise it when the prompt or the
 /// acceptance rules change in a way that existing widgets should pick up.
-const PROMPT_VERSION: u32 = 4;
+const PROMPT_VERSION: u32 = 5;
 /// A script runs every refresh on the dashboard pod. Above this many
 /// response bytes per run the model is asked for something lighter.
 const LIGHT_BYTES: usize = 300_000;
@@ -118,32 +118,75 @@ something does not work or a response is large: look for the documented paramete
 lighter endpoint instead of trying variations.\n\
 - Finish by calling `submit_script` with a script you have already seen work. It is run once more \
 and you are told if it is not accepted. With it you hand in `description`: what this application \
-is, for the second line of its card. Write it for the owner glancing at the page: a noun phrase \
-of two to five words such as \"Movie collection manager\" or \"Network-wide ad blocker\", no \
-application name, no version, no full stop.\n\
+is, for the second line of its card. Describe the application, not the card: what someone would \
+say when asked \"what is that?\", never what the blocks count (\"Log database\", not \"Log entry \
+counts\"; \"Metrics dashboards\", not \"Instance runtime metrics\"). A noun phrase of two to five \
+words such as \"Movie collection manager\" or \"Network-wide ad blocker\", no application name, \
+no version, no full stop.\n\
 - Only when research and trying have shown that the card cannot be built (the API needs a \
 credential that is not available, the service does not answer), do not submit: reply with one \
 sentence that says what is missing.\n\n\
-Rules for the script:\n\
-- Start it with one comment line: `-- <App name>: <what the card shows>`.\n\
-- Return two to four blocks. Pick what the owner wants at a glance: counts, queue lengths, \
-health, usage. Labels are short (one or two words) plain English, never translation keys such as \
-`app.pending`. Format numbers with `fmt`.\n\
-- Every block must be real information from the application's API. Never return filler such \
-as an HTTP status, \"Up\", a response size or a page title.\n\
-- Show what changes. Never spend a block on a version number, a build, a count of plugins or \
-modules, a configured interval, threshold or limit, or any other setting: the owner knows them \
-and they say nothing about how the service is doing.\n\
-- A reader must know what every number counts. Sizes go through `fmt.bytes`, speeds through \
+Blocks:\n\
+- Return two to four blocks, formatted with `fmt`. Labels are short (one or two words) plain \
+English, never translation keys such as `app.pending`.\n\
+\n\
+What a card shows. The owner glances at the page to learn two things: is this service all right, \
+and what is it doing. Choose blocks in this order and stop when you have enough:\n\
+1. What the application says is wrong with itself: its health state, failed or errored items, \
+health issues, alerts. Show it even when it reads 0 or OK today; this is the block that will \
+change colour.\n\
+2. Work waiting or in progress: queue length, active downloads, pending or unprocessed items, \
+running jobs.\n\
+3. The main thing the application holds, as one count or size: movies, documents, dashboards, \
+blocked queries today, space used.\n\
+4. Current activity, as a rate or a recent total: requests or queries per second, lines in the \
+last hour.\n\
+What a card never shows:\n\
+- Filler: an HTTP status, \"Up\", a response size, a page title, or that a credential is present \
+or valid.\n\
+- What does not change: a version number, a build, a count of plugins or modules, a configured \
+interval, threshold or limit, or any other setting.\n\
+- The process instead of the application: goroutines, threads, heap or memory of the process, \
+open file descriptors, uptime, the request rate of its own web server. The dashboard already \
+shows CPU and memory of the pods. For a monitoring tool show what it monitors (dashboards, data \
+sources, targets, alerts), not how it runs.\n\
+- A value that is missing: \"-\", \"n/a\", an empty string. If the API has no number for a block, \
+show 0 when zero is true and choose another block when it is not.\n\
+- Numbers that contradict each other, such as a download speed with nothing downloading. Read \
+the field's documentation: a total since start is not a current rate.\n\
+A reader must know what every number counts. Sizes go through `fmt.bytes`, speeds through \
 `fmt.rate`, durations through `fmt.duration`; any other quantity with a unit carries it in the \
 value (\"12/s\", \"45 ms\", \"3 days\"), and a plain count has a label that names the thing \
-counted (\"Log lines\", not \"Last 1h\").\n\
-- Mark a problem the application itself reports with `status = \"warn\"` or `status = \"error\"` \
-on the block: a health state that is not OK, alerts firing, failed or errored items, targets \
-down, something stopped or sealed that should be running. `error` is for what is broken now, \
-`warn` for what needs a look. Do not invent thresholds for ordinary counts: a queue of five or a \
-disk at 60% is not a problem, and a block that is always marked says nothing. Most blocks have \
-no status.\n\
+counted (\"Log lines\", not \"Last 1h\").\n\n\
+Severity. A block may carry `status = \"warn\"` or `status = \"error\"`. It colours the value, \
+the card and the line at the top of the page, so it must mean the same on every card:\n\
+- No status: normal operation. Nothing for the owner to do. Most blocks, most of the time.\n\
+- `warn` (amber) means \"check this when you have time\". Something is degraded or has failed, \
+but the service still does its job and nothing is lost if it waits a day. Examples: a health \
+state of WARN or degraded, redundancy reduced but still present, failed or errored items, \
+health issues the application lists, a target or a peer down, alerts firing, a disk or quota \
+nearly full by the application's own judgement, a backup or sync that is overdue.\n\
+- `error` (red) means \"act now\". The service cannot do its job, or data can be lost. Examples: \
+a health state of ERR or critical, a vault that is sealed, storage with no redundancy left or \
+objects unavailable, a database that reports corruption, a disk or pool that is full, the last \
+backup failed, every target or backend down, alerts of critical severity firing.\n\
+How to decide:\n\
+- Take the application's own severity when it has one: its WARN is `warn`, its ERR or CRITICAL \
+is `error`; alerts are `error` only when one of them is critical, otherwise `warn`.\n\
+- Ask what the owner would do on seeing it. Nothing: no status. Look into it this week: `warn`. \
+Drop everything: `error`. When unsure between two levels take the lower one. Red is rare; a \
+page that is red every day is ignored.\n\
+- The status is a condition in the script on the value it reads, never a constant. The same \
+block has no status when the value is healthy.\n\
+- Normal states are not problems: a standby, replica or passive node in a working cluster; \
+items the owner paused, skipped, ignored or disabled; updates available; zero activity; an \
+empty queue or a long one. Do not invent thresholds for ordinary counts: a queue of fifty or a \
+disk at 60% is not a problem.\n\
+- Be consistent: a count of firing alerts, failed items or health issues above zero is always \
+marked, in every application.\n\
+- Do not mark that the service is slow or unreachable. The dashboard checks that itself.\n\n\
+Rules for the script:\n\
+- Start it with one comment line: `-- <App name>: <what the card shows>`.\n\
 - Only read. Never call an endpoint that changes, deletes, restarts or triggers anything; a POST \
 is allowed only where the API uses it to log in or to query.\n\
 - The script runs every 30 seconds on a small machine. Keep what it downloads small: ask for \

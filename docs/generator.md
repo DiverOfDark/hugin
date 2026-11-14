@@ -24,6 +24,17 @@ For each service with a `widget.type`, the generator:
 
 With the script the model hands in a description of the application, a few words such as "Movie collection manager". It is stored as `spec.serviceDescription` of the `Widget` and shown as the second line of the card, unless the Ingress has a `description` annotation of its own.
 
+## What the model is told to show
+
+The model picks two to four values, in this order of preference:
+
+1. What the application says is wrong with itself: a health state, failed items, alerts.
+2. Work waiting or in progress: a queue, active downloads, unprocessed items.
+3. The main thing the application holds: movies, documents, space used.
+4. Current activity: a rate or a recent total.
+
+It is told to leave out versions and settings, figures about the process itself (goroutines, heap, uptime), missing values and filler such as "API key present". How it decides between amber and red is described under [values that report a problem](widgets.md#values-that-report-a-problem).
+
 The model gets `generator.steps` replies per service. It can also end with a sentence saying why the card cannot be built, which becomes the `Widget`'s failure message.
 
 The `Widget` is named `auto-<ingress name>` and lives in the service's namespace. It has an owner reference to the Ingress, so Argo CD lists it under the Ingress and it is deleted with it. Widgets for static services are owned by hugin's ConfigMap.
