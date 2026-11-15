@@ -47,7 +47,7 @@ A script that runs is not yet a good card: "335 MB/s" next to "0 active", "Uptim
 
 It answers with a list of problems, each naming a block: values that contradict each other or the responses, missing values and filler, a status on a normal state, a number that cannot change, a field read from the wrong place. The problems go back to the generator, which fixes them or submits the same script again when the API has nothing better.
 
-A card is sent back at most twice. The third working submission is kept without review, and a review that fails or does not answer in the expected form accepts the card, so a wrong reviewer only makes the generation slower. Reviews run only when a widget is written, not on refresh or re-checks. Turn them off with `generator.review: false`.
+A card is sent back at most twice. The third working submission is kept without review. If the steps run out after a card was sent back, the last one sent back is kept. A review that fails or does not answer in the expected form accepts the card. So a wrong reviewer only makes the generation slower, it never leaves a service without a card. Reviews run only when a widget is written, not on refresh or re-checks. Turn them off with `generator.review: false`.
 
 The model gets `generator.steps` replies per service. It can also end with a sentence saying why the card cannot be built, which becomes the `Widget`'s failure message.
 
