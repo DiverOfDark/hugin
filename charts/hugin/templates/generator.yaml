@@ -119,6 +119,8 @@ spec:
               value: {{ .Values.generator.intervalSeconds | quote }}
             - name: HUGIN_AI_WEB_SEARCH
               value: {{ .Values.generator.webSearch | quote }}
+            - name: HUGIN_AI_REVIEW
+              value: {{ .Values.generator.review | quote }}
             - name: HUGIN_GENERATE_STEPS
               value: {{ .Values.generator.steps | quote }}
             - name: HUGIN_GENERATE_RETRY_HOURS
