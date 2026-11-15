@@ -102,6 +102,16 @@ struct AiArgs {
         action = clap::ArgAction::Set
     )]
     web_search: bool,
+
+    /// Have a second model call judge every working card before it is
+    /// kept, and send it back with the problems it finds.
+    #[arg(
+        long,
+        env = "HUGIN_AI_REVIEW",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    review: bool,
 }
 
 #[derive(clap::Args, Debug, Clone)]
@@ -214,6 +224,7 @@ fn settings(ai: AiArgs, namespace: String) -> generator::Settings {
         interval: Duration::from_secs(60),
         max_steps: ai.steps.clamp(1, 40),
         web_search: ai.web_search,
+        review: ai.review,
         retry_after: Duration::ZERO,
         revalidate_after: Duration::ZERO,
         traefik_ingress_routes: false,

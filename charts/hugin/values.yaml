@@ -77,6 +77,9 @@ generator:
   # Offer the provider's hosted web search tool to the model, so it can look
   # up the API of the application it writes a widget for.
   webSearch: true
+  # Have a second model call judge every working card against the card rules
+  # before it is stored, and send it back with the problems it finds.
+  review: true
   # Secret holding the API key.
   apiKeySecret:
     name: ""
