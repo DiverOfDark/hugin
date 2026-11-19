@@ -1,6 +1,10 @@
 FROM rust:1.99-bookworm AS builder
 WORKDIR /app
 
+# cargo-auditable embeds the resolved crate list in the binary (.dep-v0
+# section, survives strip) so Trivy can report Rust CVEs from the image.
+RUN cargo install cargo-auditable@0.7.7 --locked
+
 # Build the dependency graph first so Docker can reuse this layer when only
 # source files change. The dummy main keeps Cargo happy while compiling
 # dependencies.
@@ -14,7 +18,7 @@ COPY src ./src
 COPY assets ./assets
 COPY docs ./docs
 COPY fixtures ./fixtures
-RUN cargo build --release --locked
+RUN cargo auditable build --release --locked
 
 # glibc + libgcc only; TLS roots are compiled into the binary and the
 # in-cluster CA comes from the service account mount.
